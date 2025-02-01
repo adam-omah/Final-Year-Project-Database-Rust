@@ -1,0 +1,19 @@
+{
+  "tables": {
+    "users": {
+      "name": "users",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "name",
+          "data_type": "String",
+          "rules": []
+        }
+      ]
+    }
+  }
+}

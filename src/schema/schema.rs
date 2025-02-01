@@ -1,10 +1,8 @@
-use crate::{DB_DIR, SCHEMA_FILE};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io;
-use std::io::{Result, Write};
-use std::path::Path;
+use std::io::{BufReader, Error, ErrorKind, Result};
+use crate::config::database_config::DatabaseConfig;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataType {
@@ -54,53 +52,45 @@ pub struct Schema { //Schema now contains a map of Tables
 }
 
 
-pub fn create_table(schema: &mut Schema, table: Table) -> Result<()> {
-
-    if schema.tables.contains_key(&table.name) {
-        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "Table already exists"));
-    }
-
-    schema.tables.insert(table.name.clone(), table);  // Correctly insert into HashMap
-    save_schema(schema)?;
-    Ok(())
-}
-
-pub fn save_schema(schema: &Schema) -> Result<()> {
-    let schema_path = Path::new(DB_DIR).join(SCHEMA_FILE);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true) // Overwrite existing schema
-        .open(&schema_path)?;
-
-    serde_json::to_writer_pretty(&mut file, &schema)?;
-    Ok(())
-
-}
-pub fn load_schema() -> Result<Schema> {
-    let schema_path = Path::new(DB_DIR).join(SCHEMA_FILE);
-
+pub fn load_schema(config: &DatabaseConfig) -> Result<Schema> {
+    let schema_path = config.db_dir.join(&config.schema_file);
     if !schema_path.exists() {
-        // Create a default schema if the file does not exist
         let default_schema = Schema::default();
-        save_schema(&default_schema)?;  // Save an empty/default schema
-        return Ok(default_schema);      // Return the default schema
+        save_schema(&default_schema, config)?;
+        return Ok(default_schema);
     }
 
     let file = File::open(&schema_path)?;
-    let reader = std::io::BufReader::new(file);
+    let reader = BufReader::new(file);
 
-    // Handle potential JSON parsing errors
     match serde_json::from_reader(reader) {
         Ok(schema) => Ok(schema),
         Err(err) => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+            return Err(Error::new(
+                ErrorKind::InvalidData,
                 format!("Failed to parse schema file: {}", err),
             ));
         }
     }
 }
+
+pub fn save_schema(schema: &Schema, config: &DatabaseConfig) -> Result<()> {
+    let schema_path = config.db_dir.join(&config.schema_file);
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&schema_path)?;
+    serde_json::to_writer_pretty(file, schema)?;
+    Ok(())
+}
+
+pub fn create_table(schema: &mut Schema, table: Table, config: &DatabaseConfig) -> Result<()> {
+    schema.tables.insert(table.name.clone(), table);
+    save_schema(schema, config)?;
+    Ok(())
+}
+
 
 
 pub fn check_column_rules(column: &Column, value: &str) -> Result<Option<String>> {

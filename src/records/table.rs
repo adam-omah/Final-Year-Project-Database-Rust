@@ -1,4 +1,3 @@
-use serde_json;
 use std::fs::{File, OpenOptions};
 use std::io::{Result, Write};
 use std::path::Path;
@@ -8,24 +7,24 @@ use crate::schema::{schema::create_table as schema_create_table
                     schema::DataType,
                     schema::Table};
 // Import necessary items
-use crate::{DB_DIR, TABLE_DIR};
 use crate::schema::schema::check_column_rules;
+use crate::config::database_config::DatabaseConfig;
 
-pub fn create_table(table: &Table) -> Result<()> {
-    let mut schema = load_schema()?; // Load the schema
+pub fn create_table(table: &Table, config: &DatabaseConfig) -> Result<()> { // Add config parameter
+    let mut schema = load_schema(config)?;
+    schema_create_table(&mut schema, table.clone(), config)?;
 
-    schema_create_table(&mut schema, table.clone())?; // Add or update the table in the schema
+    let table_dir = config.db_dir.join(config.table_dir.as_path()); // Use config for path
+    std::fs::create_dir_all(&table_dir)?;
 
-    let table_dir = Path::new(DB_DIR).join(TABLE_DIR); // Directory to store table data files
-    std::fs::create_dir_all(&table_dir)?; // Create the directory if it doesn't exist
-
-    let table_path = table_dir.join(&table.name); // Use the table name for the file
-    File::create(table_path)?; // Create an empty file for the table data
+    let table_path = table_dir.join(&table.name);
+    File::create(table_path)?;
     Ok(())
 }
 
-pub fn insert_row(table_name: &str, row_data: Vec<String>) -> Result<()> {
-    let schema = load_schema()?;
+
+pub fn insert_row(table_name: &str, row_data: Vec<String>, config: &DatabaseConfig) -> Result<()> { // Add config parameter
+    let schema = load_schema(config)?;
     let table = schema.tables.get(table_name).ok_or(std::io::Error::new(
         std::io::ErrorKind::NotFound,
         "Table not found",
@@ -38,7 +37,7 @@ pub fn insert_row(table_name: &str, row_data: Vec<String>) -> Result<()> {
         ));
     }
 
-    let table_dir = Path::new(DB_DIR).join(TABLE_DIR);
+    let table_dir = Path::new(config.db_dir.as_path()).join(config.table_dir.as_path());
     let table_path = table_dir.join(table_name);
 
     let mut file = OpenOptions::new().append(true).create(true).open(table_path)?;

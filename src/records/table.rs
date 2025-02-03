@@ -118,6 +118,35 @@ pub fn insert_row(table_name: &str, row_data: Vec<String>, state: &web::Data<App
     Ok(())
 }
 
+pub(crate) async fn get_table_data(state: web::Data<AppState>, table_name: &str) -> std::result::Result<Vec<Vec<String>>, std::io::Error> {
+    let mut cache = state.cache.lock().unwrap();
+    if let Some(table_data) = cache.get(table_name) {
+        Ok(table_data.clone())
+    } else {
+        let schema = state.schema.lock().unwrap();
+
+        if schema.tables.contains_key(table_name) {
+            let table_path = state.config.db_dir.join(state.config.table_dir.as_path()).join(table_name);
+            let file = File::open(table_path)?;
+            let reader = BufReader::new(file);
+            let mut table_data = Vec::new();
+            for line_result in reader.lines() {
+                if let Ok(line) = line_result {
+                    let row_values: Vec<String> = line.split(',').map(|s| s.trim_matches('"').to_string()).collect();
+                    table_data.push(row_values);
+
+                } else {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, "Error reading a line"));
+                }
+            }
+            cache.insert(table_name.to_string(), table_data.clone());
+            Ok(table_data)
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Table not found"))
+        }
+    }
+}
+
 // API end point for get tables.
 
 #[get("/tables/{table_name}")]

@@ -10,6 +10,17 @@ pub enum DataType {
     String,
 }
 
+impl From<&str> for DataType {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "int" | "integer" => DataType::Int,
+            "string" | "text" | "varchar" => DataType::String,  // Handle common string type names
+            _ => panic!("Unsupported data type: {}", s), // Or handle with a Result
+        }
+    }
+}
+
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RuleType {
     Unique,

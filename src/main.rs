@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 pub mod config;
 pub mod schema;
 pub mod records;
+pub mod query;
+mod executer;
 
 use crate::config::database_config::DatabaseConfig;
 
@@ -16,6 +18,7 @@ use schema::{
     schema::load_schema,
     schema::Schema,
 };
+use crate::executer::executer::execute_query_endpoint;
 
 // public constants
 pub const DB_DIR: &str = "mydb";
@@ -49,6 +52,7 @@ async fn main() -> Result<()> {
                 config: config.clone(),
                 cache: cache.clone(),}))
             .service(get_table)
+            .service(execute_query_endpoint)
     })
         .bind(("127.0.0.1", 8080))?
         .run()
@@ -131,7 +135,7 @@ async fn test_application() -> Result<()> {
     let app = test::init_service(
         App::new()
             .app_data(app_state.clone())
-            .service(get_table),
+            .service(get_table)
     )
         .await;
 

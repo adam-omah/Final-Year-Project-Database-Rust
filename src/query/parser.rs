@@ -1,6 +1,4 @@
-use actix_web::FromRequest;
 use serde::{Deserialize, Serialize};
-use std::error::Error;
 use std::str;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]

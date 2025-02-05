@@ -46,7 +46,7 @@ pub async fn execute_query(
                     return HttpResponse::BadRequest().body("FROM clause missing after SELECT");
                 }
             }
-            ASTNode::CreateTable { table, columns } => {
+            ASTNode::Create { table, columns } => {
                 if let Identifier::Name(table_name) = table {
                     let table = schema::Table {
                         name: table_name.to_string(),

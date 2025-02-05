@@ -1,6 +1,5 @@
 # Use the official Rust image as the base image
 FROM rust:1.84.0 as builder
-LABEL authors="Adam"
 
 # Set the working directory in the container
 WORKDIR /app

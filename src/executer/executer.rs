@@ -5,13 +5,19 @@ use crate::schema::schema;
 use crate::schema::schema::DataType;
 use crate::AppState;
 use actix_web::{post, web, HttpRequest, HttpResponse};
+use tracing::log::{debug, info};
+
+
 // Import your table functions
+
+
 
 pub async fn execute_query(
     ast_nodes: Vec<ASTNode>,
     data: web::Data<AppState>,
     _req: HttpRequest,
 ) -> HttpResponse { // Previously impl Responder
+    info!("Executing query with {} AST nodes", ast_nodes.len());
     for i in 0..ast_nodes.len() {
         match &ast_nodes[i] {
             ASTNode::Select { columns } => {
@@ -79,30 +85,39 @@ pub async fn execute_query(
                 }
             }
 
-            ASTNode::Insert {
-                table,
-                values,
-                columns,
-            } => {
+            ASTNode::Insert { table, values, columns } => {
                 if let Identifier::Name(table_name) = table {
-                    // Process values based on provided columns
-                    let values: Vec<String> = values
+                    let values_string: Vec<String> = values
                         .iter()
                         .map(|v| {
                             if let Identifier::Literal(lit) = v {
-                                lit.to_string()
+                                // Remove quotes from string literals if present
+                                let cleaned_lit = if lit.starts_with('"') && lit.ends_with('"') {
+                                    lit[1..lit.len() - 1].to_string()
+                                } else {
+                                    lit.to_string()
+                                };
+                                cleaned_lit
                             } else {
-                                panic!("Invalid literal value in INSERT")
+                                panic!("Invalid literal value in INSERT") // Or handle the error as needed
                             }
                         })
                         .collect();
 
-                    match insert_row(table_name, values, &data) {
+                    let columns_opt = if columns.is_empty() {
+                        None
+                    } else {
+                        Some(columns.into_iter().filter_map(|c| {
+                            if let Identifier::Name(name) = c {
+                                Some(name.to_string())
+                            } else {
+                                None // Or handle the unexpected Identifier type as needed (e.g., log a warning, return an error)
+                            }
+                        }).collect())
+                    };
+                    match insert_row(table_name, values_string, columns_opt, &data) {
                         Ok(_) => return HttpResponse::Ok().body("Row inserted"),
-                        Err(err) => {
-                            return HttpResponse::InternalServerError()
-                                .body(format!("Error inserting row: {}", err))
-                        }
+                        Err(err) => return HttpResponse::InternalServerError().body(format!("Error inserting row: {}", err)),
                     }
                 } else {
                     return HttpResponse::BadRequest().body("Invalid table name in INSERT statement");
@@ -150,12 +165,14 @@ fn find_column_index(table_data: &[Vec<String>], col_name: &str) -> Option<usize
 }
 
 
+
 #[post("/query")]
 async fn execute_query_endpoint(
     query: web::Json<String>,
     data: web::Data<AppState>,
 ) -> HttpResponse { // Return plain HttpResponse
     let sql_query = query.into_inner();
+    debug!("Received query: {}", sql_query);
     let query_bytes = sql_query.as_bytes();
     let http_request = actix_web::test::TestRequest::default().to_http_request();
 

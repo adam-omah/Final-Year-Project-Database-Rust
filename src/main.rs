@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::io::{Result};
 use std::string::String;
 use std::sync::{Arc, Mutex};
+use tracing::subscriber;
 
 // Module Imports.
 pub mod config;
@@ -43,6 +44,7 @@ fn init_database(config: &DatabaseConfig) -> Result<()> {
 async fn main() -> Result<()> {
     let config = DatabaseConfig::default();
     init_database(&config)?;
+    tracing-subscriber::fmt::init();
     let schema = Arc::new(Mutex::new(load_schema(&config)?));
     let cache = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -125,8 +127,8 @@ async fn test_application() -> Result<()> {
         };
         if !schema.lock().unwrap().tables.contains_key("users") {
             create_table(&user_table, &app_state)?;
-            insert_row("users", vec!["1".to_string(), "Alice".to_string()], &app_state)?;
-            insert_row("users", vec!["2".to_string(), "Bob".to_string()], &app_state)?;
+            insert_row("users", vec!["1".to_string(), "Alice".to_string()], None,&app_state)?;
+            insert_row("users", vec!["2".to_string(), "Bob".to_string()], None ,&app_state)?;
         };
     };
 

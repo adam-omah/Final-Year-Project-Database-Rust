@@ -41,23 +41,43 @@ pub struct ASTNodes(pub Vec<ASTNode>);
 
 pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
     let query_str = str::from_utf8(query_bytes).map_err(|e| e.to_string())?;
-    let tokens: Vec<&str> = query_str
-        .split_whitespace()
-        .filter(|token| !token.is_empty())
-        .collect();
+    // Improved and FINAL Tokenization (No re-tokenizing!)
+    let mut tokens = Vec::new();
+    let mut in_string = false;
+    let mut current_token = String::new();
 
-    if tokens.is_empty() {
-        return Err("Empty query".to_string());
+    for char in query_str.chars() {
+        if char == '"' {
+            in_string = !in_string;
+            current_token.push(char);
+            if !in_string {
+                tokens.push(current_token.clone());
+                current_token.clear();
+            }
+        } else if in_string {
+            current_token.push(char);
+        } else if char == '(' || char == ')' || char == ',' {
+            if !current_token.is_empty() {
+                tokens.push(current_token.clone());
+                current_token.clear();
+            }
+            tokens.push(char.to_string());
+        } else if char.is_whitespace() {
+            if !current_token.is_empty() {
+                tokens.push(current_token.clone());
+                current_token.clear();
+            }
+        } else {
+            current_token.push(char);
+        }
+    }
+    if !current_token.is_empty() {
+        tokens.push(current_token);
     }
 
-    let tokens: Vec<String> = query_str
-        .replace("(", " ( ")
-        .replace(")", " ) ")
-        .replace(",", " , ")
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
-
+    if(tokens.is_empty()){
+        return Err("Query is empty".to_string());
+    }
 
     let mut ast_nodes = Vec::new();
     let mut index = 0;
@@ -161,10 +181,65 @@ pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
                     return Err("Expected TABLE after CREATE".to_string());
                 }
             }
+            "INSERT" => {
+                index += 1;
+                if index < tokens.len() && tokens[index] == "INTO" {
+                    index += 1;
+                    if index < tokens.len() {
+                        let table = Identifier::Name(tokens[index].clone());
+                        index += 1;
+
+                        let mut columns = Vec::new();
+                        if index < tokens.len() && tokens[index] == "(" {
+                            index += 1;
+                            while index < tokens.len() && tokens[index] != ")" {
+                                columns.push(Identifier::Name(tokens[index].clone()));
+                                index += 1;
+                                if index < tokens.len() && tokens[index] == "," {
+                                    index += 1;
+                                }
+                            }
+                            if index < tokens.len() && tokens[index] == ")" {
+                                index += 1;
+                            } else {
+                                return Err("Expected ')' after column list".to_string());
+                            }
+                        }
+
+                        if index < tokens.len() && tokens[index] == "VALUES" {
+                            index += 1;
+                            if index < tokens.len() && tokens[index] == "(" {
+                                index += 1;
+                                let mut values = Vec::new();
+                                while index < tokens.len() && tokens[index] != ")" {
+                                    values.push(Identifier::Literal(tokens[index].clone())); // Treat values as literals
+                                    index += 1;
+                                    if index < tokens.len() && tokens[index] == "," {
+                                        index += 1;
+                                    }
+                                }
+                                if index < tokens.len() && tokens[index] == ")" {
+                                    index += 1;
+                                    ast_nodes.push(ASTNode::Insert { table, columns, values });
+                                } else {
+                                    return Err("Expected ')' after values list".to_string());
+                                }
+                            } else {
+                                return Err("Expected '(' after VALUES".to_string());
+                            }
+                        } else {
+                            return Err("Expected VALUES after table name".to_string());
+                        }
+                    } else {
+                        return Err("Expected table name after INSERT INTO".to_string());
+                    }
+                } else {
+                    return Err("Expected INTO after INSERT".to_string());
+                }
+            }
             _ => return Err(format!("Unexpected token: {}", tokens[index])),
         }
     }
-
     Ok(ast_nodes)
 }
 
@@ -253,5 +328,41 @@ mod tests {
         assert_eq!(ast.err().unwrap(), "Invalid column definition".to_string());
     }
 
+    #[test]
+    fn test_insert_statement() {
+        let query = b"INSERT INTO users (id, name) VALUES (1, \"John Doe\")";
+        let ast = basic_sql_parser(query).unwrap();
 
+        assert_eq!(
+            ast,
+            vec![ASTNode::Insert {
+                table: Identifier::Name("users".to_string()),
+                columns: vec![
+                    Identifier::Name("id".to_string()),
+                    Identifier::Name("name".to_string())
+                ],
+                values: vec![
+                    Identifier::Literal("1".to_string()),
+                    Identifier::Literal("\"John Doe\"".to_string()) // Now parsed correctly
+                ]
+            }]
+        );
+    }
+
+
+    #[test]
+    fn test_insert_without_columns() {
+        let query = b"INSERT INTO users VALUES (1, \"test\")";
+        let ast = basic_sql_parser(query).unwrap();
+        assert_eq!(ast, vec![
+            ASTNode::Insert {
+                table: Identifier::Name("users".to_string()),
+                columns: vec![], // No columns specified
+                values: vec![
+                    Identifier::Literal("1".to_string()),
+                    Identifier::Literal("\"test\"".to_string()),
+                ],
+            },
+        ]);
+    }
 }

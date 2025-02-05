@@ -26,63 +26,42 @@ pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
     Ok(())
 }
 
-pub fn insert_row(table_name: &str, row_data: Vec<String>, state: &web::Data<AppState>) -> Result<()> {
+pub fn insert_row(
+    table_name: &str,
+    row_data: Vec<String>,
+    columns: Option<Vec<String>>, // Optional column names
+    state: &web::Data<AppState>,
+) -> Result<()> {
+
     let mut cache = state.cache.lock().unwrap();
-    let column_types: Vec<DataType>;
 
     // 1. Check Cache First
     if let Some(cached_table) = cache.get_mut(table_name) {
-        // Lock schema to get column types
-        {
-            let schema = state.schema.lock().unwrap();
-            let table = schema.tables.get(table_name).expect("Table not found in schema, even though it's in the cache. This is a serious internal error.");
-            if row_data.len() != table.columns.len() {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Data length mismatch"));
-            }
-            column_types = table.columns.iter().map(|c| c.data_type.clone()).collect();
-        } // schema lock dropped here
-
-        // Process cached table using pre-loaded column_types
-        let mut serialized_row = String::new();
-        for (i, value) in row_data.iter().enumerate() {
-            let checked_value = check_column_rules(&state.schema.lock().unwrap().tables[table_name].columns[i], value)?;
-
-            match checked_value {
-                Some(final_value) => {
-                    if column_types[i] == DataType::Int { // Access column_types
-                        match final_value.parse::<i64>() {
-                            Ok(int_val) => serialized_row.push_str(&format!("{}", int_val)),
-                            Err(_) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid integer")),
-                        }
-                    } else if column_types[i] == DataType::String { // Access column_types
-                        serialized_row.push_str(&format!("\"{}\"", final_value));
-                    }
-                },
-                None => serialized_row.push_str("NULL"),
-            }
-            if i < row_data.len() - 1 {
-                serialized_row.push_str(",");
-            }
+        let schema = state.schema.lock().unwrap(); // Lock schema outside the loop
+        let table = schema.tables.get(table_name).expect("Table not found");
+        if columns.is_none() && row_data.len() != table.columns.len() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Data length mismatch"));
         }
+        // Process cached table
         cached_table.push(row_data.clone());
+
     } else {
-        // 2. Check if File Exists on Filesystem (New Step)
+
         let table_dir = Path::new(state.config.db_dir.as_path()).join(state.config.table_dir.as_path());
         let table_path = table_dir.join(table_name);
 
         if metadata(&table_path).is_ok() {
-            // File exists, but not in cache. Load from file system later and insert into cache.
             cache.insert(table_name.to_string(), Vec::new()); // Initialize the entry with an empty vector
         } else {
-            // 3. If File Doesn't Exist, Check Schema
             let schema = state.schema.lock().unwrap();
 
             let table = schema.tables.get(table_name).ok_or(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "Table not found in schema or filesystem", // Updated error message
+                "Table not found in schema or filesystem",
             ))?;
 
-            if row_data.len() != table.columns.len() {
+
+            if columns.is_none() && row_data.len() != table.columns.len() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "Data length mismatch",
@@ -94,29 +73,71 @@ pub fn insert_row(table_name: &str, row_data: Vec<String>, state: &web::Data<App
         }
     }
 
-    // Write to File (All cases write to the file, but using the correct information source)
+
+    // Write to File (Adapted for optional columns)
     let table_dir = Path::new(state.config.db_dir.as_path()).join(state.config.table_dir.as_path());
     let table_path = table_dir.join(table_name);
-    let mut file = OpenOptions::new().append(true).create(true).open(table_path)?;
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(table_path)?;
 
-    // Serialization is the same regardless of the source
-    let row_to_serialize = &cache[table_name].last().unwrap();
+    let schema = state.schema.lock().unwrap(); // Lock schema outside the loop
+    let table = schema.tables.get(table_name).expect("Table not found");
+
+    let binding = state.cache.lock().unwrap();
+    let row_to_serialize = &binding[table_name].last().unwrap();
     let mut serialized_row = String::new();
-    for (i, value) in row_to_serialize.iter().enumerate() {
-        if i > 0 {
-            serialized_row.push(',');
+
+
+    // Handle optional column names for serialization
+
+    if let Some(cols) = columns{
+        if cols.len() != row_data.len(){
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "The number of columns specified does not equal the number of values given".to_string()));
         }
-        if let DataType::String = state.schema.lock().unwrap().tables[table_name].columns[i].data_type {
-            serialized_row.push('"');
-            serialized_row.push_str(value);
-            serialized_row.push('"');
-        } else {
-            serialized_row.push_str(value);
+        for (i, col_name) in cols.iter().enumerate(){
+            //Ensure column exists in table
+            if !table.columns.iter().any(|c| c.name == *col_name){
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Column {} does not exist in table {}",col_name,table_name)));
+            }
+            let col_index = table.columns.iter().position(|c| &c.name == col_name).unwrap();
+
+            if i > 0 {
+                serialized_row.push(',');
+            }
+            if let DataType::String = table.columns[col_index].data_type {
+                serialized_row.push('"');
+                serialized_row.push_str(&row_data[i]);
+                serialized_row.push('"');
+            } else {
+                serialized_row.push_str(&row_data[i]);
+            }
+
+        }
+    } else {
+        if row_data.len() != table.columns.len() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Data length mismatch"));
+        }
+        // No columns provided, use all in default order
+        for (i, value) in row_to_serialize.iter().enumerate() {
+            if i > 0 {
+                serialized_row.push(',');
+            }
+            if let DataType::String = table.columns[i].data_type {
+                serialized_row.push('"');
+                serialized_row.push_str(value);
+                serialized_row.push('"');
+            } else {
+                serialized_row.push_str(value);
+            }
         }
     }
+
     writeln!(file, "{}", serialized_row)?;
     Ok(())
 }
+
 
 pub(crate) async fn get_table_data(state: web::Data<AppState>, table_name: &str) -> std::result::Result<Vec<Vec<String>>, std::io::Error> {
     let mut cache = state.cache.lock().unwrap();

@@ -86,7 +86,9 @@ pub async fn execute_query(
             }
 
             ASTNode::Insert { table, values, columns } => {
+                debug!("Insert statement: {:?}", ast_nodes);
                 if let Identifier::Name(table_name) = table {
+                    debug!("Entered the if let Identifier::Name(table_name) = table");
                     let values_string: Vec<String> = values
                         .iter()
                         .map(|v| {
@@ -115,6 +117,7 @@ pub async fn execute_query(
                             }
                         }).collect())
                     };
+                    debug!("attempted to insert row");
                     match insert_row(table_name, values_string, columns_opt, &data) {
                         Ok(_) => return HttpResponse::Ok().body("Row inserted"),
                         Err(err) => return HttpResponse::InternalServerError().body(format!("Error inserting row: {}", err)),

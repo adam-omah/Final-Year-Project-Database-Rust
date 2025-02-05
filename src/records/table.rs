@@ -29,79 +29,92 @@ pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
 pub fn insert_row(
     table_name: &str,
     row_data: Vec<String>,
-    columns: Option<Vec<String>>, // Optional column names
+    columns: Option<Vec<String>>,
     state: &web::Data<AppState>,
 ) -> Result<()> {
-
     let mut cache = state.cache.lock().unwrap();
 
-    // 1. Check Cache First
-    if let Some(cached_table) = cache.get_mut(table_name) {
-        let schema = state.schema.lock().unwrap(); // Lock schema outside the loop
-        let table = schema.tables.get(table_name).expect("Table not found");
-        if columns.is_none() && row_data.len() != table.columns.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Data length mismatch"));
-        }
-        // Process cached table
-        cached_table.push(row_data.clone());
-
-    } else {
-
-        let table_dir = Path::new(state.config.db_dir.as_path()).join(state.config.table_dir.as_path());
+    // Load table data into cache if not present
+    if !cache.contains_key(table_name) {
+        let table_dir = Path::new(state.config.db_dir.as_path())
+            .join(state.config.table_dir.as_path());
         let table_path = table_dir.join(table_name);
 
         if metadata(&table_path).is_ok() {
-            cache.insert(table_name.to_string(), Vec::new()); // Initialize the entry with an empty vector
-        } else {
-            let schema = state.schema.lock().unwrap();
+            // Load existing data from file
+            let file = File::open(&table_path)?;
+            let reader = BufReader::new(file);
+            let mut table_data = Vec::new();
 
-            let table = schema.tables.get(table_name).ok_or(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Table not found in schema or filesystem",
-            ))?;
-
-
-            if columns.is_none() && row_data.len() != table.columns.len() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Data length mismatch",
-                ));
+            for line in reader.lines() {
+                let line = line?;
+                let row_values: Vec<String> = line
+                    .split(',')
+                    .map(|s| s.trim_matches('"').to_string())
+                    .collect();
+                table_data.push(row_values);
             }
 
-            drop(schema);
-            cache.insert(table_name.to_string(), vec![row_data.clone()]); // Add to cache
+            cache.insert(table_name.to_string(), table_data);
+        } else {
+            // New table, initialize empty cache
+            cache.insert(table_name.to_string(), Vec::new());
         }
     }
 
+    // Validate data against schema
+    let schema = state.schema.lock().unwrap();
+    let table = schema.tables.get(table_name)
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Table not found in schema"
+        ))?;
 
-    // Write to File (Adapted for optional columns)
-    let table_dir = Path::new(state.config.db_dir.as_path()).join(state.config.table_dir.as_path());
+    // Validate columns and data
+    if let Some(cols) = &columns {
+        if cols.len() != row_data.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "The number of columns specified does not equal the number of values given"
+            ));
+        }
+        // Validate each specified column exists
+        for col_name in cols.iter() {
+            if !table.columns.iter().any(|c| c.name == *col_name) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Column {} does not exist in table {}", col_name, table_name)
+                ));
+            }
+        }
+    } else if row_data.len() != table.columns.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Data length mismatch"
+        ));
+    }
+
+    // Update cache
+    if let Some(cached_table) = cache.get_mut(table_name) {
+        cached_table.push(row_data.clone());
+    }
+
+    // Write to file
+    let table_dir = Path::new(state.config.db_dir.as_path())
+        .join(state.config.table_dir.as_path());
     let table_path = table_dir.join(table_name);
     let mut file = OpenOptions::new()
         .append(true)
         .create(true)
         .open(table_path)?;
 
-    let schema = state.schema.lock().unwrap(); // Lock schema outside the loop
-    let table = schema.tables.get(table_name).expect("Table not found");
-
-    let binding = state.cache.lock().unwrap();
-    let row_to_serialize = &binding[table_name].last().unwrap();
     let mut serialized_row = String::new();
 
-
-    // Handle optional column names for serialization
-
-    if let Some(cols) = columns{
-        if cols.len() != row_data.len(){
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "The number of columns specified does not equal the number of values given".to_string()));
-        }
-        for (i, col_name) in cols.iter().enumerate(){
-            //Ensure column exists in table
-            if !table.columns.iter().any(|c| c.name == *col_name){
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Column {} does not exist in table {}",col_name,table_name)));
-            }
-            let col_index = table.columns.iter().position(|c| &c.name == col_name).unwrap();
+    if let Some(cols) = columns {
+        for (i, col_name) in cols.iter().enumerate() {
+            let col_index = table.columns.iter()
+                .position(|c| c.name == *col_name)
+                .unwrap(); // Safe because we validated earlier
 
             if i > 0 {
                 serialized_row.push(',');
@@ -113,14 +126,9 @@ pub fn insert_row(
             } else {
                 serialized_row.push_str(&row_data[i]);
             }
-
         }
     } else {
-        if row_data.len() != table.columns.len() {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Data length mismatch"));
-        }
-        // No columns provided, use all in default order
-        for (i, value) in row_to_serialize.iter().enumerate() {
+        for (i, value) in row_data.iter().enumerate() {
             if i > 0 {
                 serialized_row.push(',');
             }

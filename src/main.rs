@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use std::io::{Result};
 use std::string::String;
 use std::sync::{Arc, Mutex};
-use tracing::subscriber;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 // Module Imports.
 pub mod config;
@@ -42,9 +43,12 @@ fn init_database(config: &DatabaseConfig) -> Result<()> {
 
 #[actix_web::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
     let config = DatabaseConfig::default();
     init_database(&config)?;
-    tracing-subscriber::fmt::init();
     let schema = Arc::new(Mutex::new(load_schema(&config)?));
     let cache = Arc::new(Mutex::new(BTreeMap::new()));
 

@@ -2,6 +2,9 @@
 
 ## Overview
 
+
+An abstract syntax tree (AST) is a data structure used in computer science to represent the structure of a program or code snippet.
+
 ### Docker Commands
 Build Command:
 ``

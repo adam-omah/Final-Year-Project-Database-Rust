@@ -1,9 +1,9 @@
 // Import necessary items
-use crate::schema::schema::check_column_rules;
-use crate::schema::{schema::create_table as schema_create_table
-                    ,
+use crate::schema::{schema::create_table as schema_create_table,
                     schema::DataType,
-                    schema::Table};
+                    schema::Table,
+                    schema::check_column_rules,
+                    schema::is_valid_data_type};
 use crate::AppState;
 use actix_web::{get, web, HttpResponse, Responder};
 use std::fs::{metadata, File, OpenOptions};
@@ -62,7 +62,6 @@ pub fn insert_row(
         }
     }
 
-    // Validate data against schema
     let schema = state.schema.lock().unwrap();
     let table = schema.tables.get(table_name)
         .ok_or_else(|| std::io::Error::new(
@@ -70,7 +69,7 @@ pub fn insert_row(
             "Table not found in schema"
         ))?;
 
-    // Validate columns and data
+    // Validate columns and data lengths
     if let Some(cols) = &columns {
         if cols.len() != row_data.len() {
             return Err(std::io::Error::new(
@@ -78,7 +77,7 @@ pub fn insert_row(
                 "The number of columns specified does not equal the number of values given"
             ));
         }
-        // Validate each specified column exists
+
         for col_name in cols.iter() {
             if !table.columns.iter().any(|c| c.name == *col_name) {
                 return Err(std::io::Error::new(
@@ -87,6 +86,7 @@ pub fn insert_row(
                 ));
             }
         }
+
     } else if row_data.len() != table.columns.len() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -94,9 +94,49 @@ pub fn insert_row(
         ));
     }
 
+
+
+
+    let mut processed_row_data: Vec<String> = Vec::new();
+
+    if let Some(cols) = &columns {
+        for (i, col_name) in cols.iter().enumerate() {
+            let col = table.columns.iter().find(|c| c.name == *col_name).unwrap();
+            let value = &row_data[i];
+
+            if !is_valid_data_type(&col.data_type, value) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Invalid data type for column: {}", col_name)
+                ));
+            }
+            match check_column_rules(col, value) {
+                Ok(Some(val)) => processed_row_data.push(val),
+                Ok(None) => processed_row_data.push(String::new()),
+                Err(e) => return Err(e),
+            }
+        }
+    } else {
+        for (_i, (value, col)) in row_data.iter().zip(table.columns.iter()).enumerate() {
+            if !is_valid_data_type(&col.data_type, value) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Invalid data type for column: {}", col.name)
+                ));
+            }
+            match check_column_rules(col, value) {
+                Ok(Some(val)) => processed_row_data.push(val),
+                Ok(None) => processed_row_data.push(String::new()),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+
+
     // Update cache
     if let Some(cached_table) = cache.get_mut(table_name) {
-        cached_table.push(row_data.clone());
+        cached_table.push(processed_row_data.clone());
     }
 
     // Write to file
@@ -109,26 +149,25 @@ pub fn insert_row(
         .open(table_path)?;
 
     let mut serialized_row = String::new();
-
+    // If columns are provided, use their order for serialization
     if let Some(cols) = columns {
         for (i, col_name) in cols.iter().enumerate() {
-            let col_index = table.columns.iter()
-                .position(|c| c.name == *col_name)
-                .unwrap(); // Safe because we validated earlier
+            let col_index = table.columns.iter().position(|c| c.name == *col_name).unwrap();
 
             if i > 0 {
                 serialized_row.push(',');
             }
             if let DataType::String = table.columns[col_index].data_type {
                 serialized_row.push('"');
-                serialized_row.push_str(&row_data[i]);
+                serialized_row.push_str(&processed_row_data[i]);
                 serialized_row.push('"');
             } else {
-                serialized_row.push_str(&row_data[i]);
+                serialized_row.push_str(&processed_row_data[i]);
             }
         }
     } else {
-        for (i, value) in row_data.iter().enumerate() {
+        // Otherwise, serialize data according to table schema order
+        for (i, value) in processed_row_data.iter().enumerate() {
             if i > 0 {
                 serialized_row.push(',');
             }
@@ -141,10 +180,10 @@ pub fn insert_row(
             }
         }
     }
-
     writeln!(file, "{}", serialized_row)?;
     Ok(())
 }
+
 
 
 pub(crate) async fn get_table_data(state: web::Data<AppState>, table_name: &str) -> std::result::Result<Vec<Vec<String>>, std::io::Error> {

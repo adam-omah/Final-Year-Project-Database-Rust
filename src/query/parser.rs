@@ -75,7 +75,7 @@ pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
         tokens.push(current_token);
     }
 
-    if(tokens.is_empty()){
+    if tokens.is_empty() {
         return Err("Query is empty".to_string());
     }
 

@@ -137,3 +137,11 @@ pub fn check_column_rules(column: &Column, value: &str) -> Result<Option<String>
     }
     Ok(Some(value.to_string())) // Return the original value if no rules or rules passed
 }
+
+pub fn is_valid_data_type(data_type: &DataType, value: &str) -> bool {
+    match data_type {
+        DataType::Int => value.parse::<i64>().is_ok(), // Or your desired integer type
+        DataType::String => true, // Strings are always valid (for now)
+        // You can add validation for String length, format, etc. here
+    }
+}

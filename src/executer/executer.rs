@@ -2,7 +2,7 @@ use crate::query::parser::{basic_sql_parser, ASTNode, Identifier};
 // Import your AppState
 use crate::records::table::{create_table, get_table_data, insert_row};
 use crate::schema::schema;
-use crate::schema::schema::DataType;
+use crate::schema::schema::{get_column_names_from_schema, DataType};
 use crate::AppState;
 use actix_web::{post, web, HttpRequest, HttpResponse};
 use tracing::log::{debug, info};
@@ -25,10 +25,9 @@ pub async fn execute_query(
                     if let ASTNode::From { table } = &ast_nodes[i + 1] {
                         if let Identifier::Name(table_name) = table {
                             let table_data_result = get_table_data(data.clone(), table_name).await;
-
                             match table_data_result {
                                 Ok(table_data) => {
-                                    let result = process_select(columns, &table_data);
+                                    let result = process_select(columns, &table_data, data.clone(), table_name).await;
                                     match serde_json::to_string(&result) {
                                         Ok(json) => return HttpResponse::Ok().body(json),
                                         Err(e) => return HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
@@ -134,15 +133,25 @@ pub async fn execute_query(
     HttpResponse::BadRequest().body("No valid SQL query provided")
 }
 
-fn process_select(columns: &[Identifier], table_data: &[Vec<String>]) -> Vec<Vec<String>> {
+async fn process_select(columns: &[Identifier], table_data: &[Vec<String>], data: web::Data<AppState>, table_name: &str) -> Vec<Vec<String>> {
     let mut result = Vec::new();
+
+    // Check if table_data is empty
+    if table_data.is_empty() {
+        return result; // Return an empty result if there's no data
+    }
+
+    let column_names = match get_column_names_from_schema(&data, table_name) {
+        Ok(names) => names,
+        Err(_) => return result, // Return an empty result if can't get column names
+    };
+
     for row in table_data {
         let mut selected_row = Vec::new();
         for col in columns {
             match col {
                 Identifier::Name(col_name) => {
-
-                    if let Some(index) = find_column_index(table_data, col_name) {
+                    if let Some(index) = find_column_index(&column_names, col_name) {
                         if let Some(value) = row.get(index) {
                             selected_row.push(value.to_string());
                         }
@@ -151,20 +160,15 @@ fn process_select(columns: &[Identifier], table_data: &[Vec<String>]) -> Vec<Vec
                 Identifier::Star => selected_row.extend_from_slice(row),
                 _ => (),
             }
-
         }
         result.push(selected_row);
     }
     result
-
 }
 
-fn find_column_index(table_data: &[Vec<String>], col_name: &str) -> Option<usize> {
-    if let Some(header_row) = table_data.first() {
-        header_row.iter().position(|col| col == col_name)
-    } else {
-        None
-    }
+
+fn find_column_index(column_names: &[String], col_name: &str) -> Option<usize> {
+    column_names.iter().position(|col| col == col_name)
 }
 
 

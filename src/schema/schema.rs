@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Error, ErrorKind, Result};
+use actix_web::web;
+use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
@@ -143,5 +145,15 @@ pub fn is_valid_data_type(data_type: &DataType, value: &str) -> bool {
         DataType::Int => value.parse::<i64>().is_ok(), // Or your desired integer type
         DataType::String => true, // Strings are always valid (for now)
         // You can add validation for String length, format, etc. here
+    }
+}
+
+pub fn get_column_names_from_schema(state: &web::Data<AppState>, table_name: &str) -> Result<Vec<String>> {
+    let schema = state.schema.lock().unwrap();
+    if let Some(table) = schema.tables.get(table_name) {
+        let column_names: Vec<String> = table.columns.iter().map(|col| col.name.clone()).collect();
+        Ok(column_names)
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Table not found"))
     }
 }

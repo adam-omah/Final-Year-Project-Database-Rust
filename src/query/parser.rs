@@ -22,7 +22,8 @@ pub enum Expression {
 
 
 // Abstract Syntax Trees, Needed for possible valid parsing,
-// If Queries are a valid AST action it
+// If Query strings transform into a valid AST Node
+// The Executer will then action it.
 #[derive(Debug, Serialize, Deserialize,PartialEq, Eq,Clone)]
 pub enum ASTNode {
     Select { columns: Vec<Identifier> },

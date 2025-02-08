@@ -1,0 +1,1110 @@
+I have the following Rust application, however there is some prevelant errors in it currently. First off the insert row function is taking into account the update _ row however this will need to be its own function that the executer will call, secondly the schema has the current table array however this is wrong as well, the basis of the rust app is to be a database engine that is append only, inserts go into the table_initial and updates into the table_updates, the current table is stored in the app cache which is a representation of the initial table values and if they have been updated to point to the most recent update of the value.
+
+The following files make up the application, please review, update the insert_row function in table.rs and create a new Update_row functionality, while also ensuring that the cache keeps the most up to date version of the table in memory,and removing this current table reference in the schema.rs file.
+
+main.rs:
+
+// Module Imports.
+pub mod config;
+pub mod schema;
+pub mod records;
+pub mod query;
+mod executer;
+
+use crate::config::database_config::DatabaseConfig;
+
+use crate::records::table::get_table;
+use schema::{
+    schema::load_schema,
+    schema::Schema,
+};
+use crate::executer::executer::execute_query_endpoint;
+
+// public constants
+pub const DB_DIR: &str = "mydb";
+pub const SCHEMA_FILE: &str = "schema.json";
+pub const TABLE_DIR: &str = "tables";
+
+#[derive(Clone)]
+pub struct AppState {
+    pub schema: Arc<Mutex<Schema>>,
+    pub config: DatabaseConfig,
+    pub cache: Arc<Mutex<BTreeMap<String, Vec<Vec<String>>>>>
+}
+
+
+fn init_database(config: &DatabaseConfig) -> Result<()> {
+    std::fs::create_dir_all(&config.db_dir)?;
+    std::fs::create_dir_all(config.db_dir.join(config.table_dir.as_path()))?;
+    Ok(())
+}
+
+#[actix_web::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    let config = DatabaseConfig::default();
+    init_database(&config)?;
+    let schema = Arc::new(Mutex::new(load_schema(&config)?));
+    let cache = Arc::new(Mutex::new(BTreeMap::new()));
+
+    HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(AppState { schema: schema.clone(),
+                config: config.clone(),
+                cache: cache.clone(),}))
+            .service(get_table)
+            .service(execute_query_endpoint)
+    })
+        .bind(("0.0.0.0", 8080))?
+        .run()
+        .await?;
+    Ok(())
+}
+
+
+######
+
+schema.rs
+
+// Schema.rs
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Error, ErrorKind, Result};
+use actix_web::web;
+use crate::AppState;
+use crate::config::database_config::DatabaseConfig;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DataType {
+    Int,
+    String,
+    UUID
+}
+
+impl From<&str> for DataType {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "int" | "integer" => DataType::Int,
+            "string" | "text" | "varchar" => DataType::String,  // Handle common string type names
+            "uuid" => DataType::UUID,
+            _ => panic!("Unsupported data type: {}", s), // Or handle with a Result
+        }
+    }
+}
+
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RuleType {
+    Unique,
+    NotNull,
+    // Add more rule types as needed (e.g., MinLength, MaxLength, etc.)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Rule {
+    pub rule_type: RuleType,
+    pub action: RuleAction, // Add the action field
+    // You can add fields here for rule-specific parameters (e.g., min length value)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum RuleAction {
+    SetNull,
+    SetDefault(String),
+    Reject,
+}
+
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Column {
+    pub name: String,
+    pub data_type: DataType,
+    pub rules: Vec<Rule>, // Rules applied to this column
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Table {
+    pub name: String,
+    pub columns: Vec<Column>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(default)]
+pub struct Schema { //Schema now contains a map of Tables
+    pub tables: HashMap<String, Table>,
+    #[serde(skip)]  // Add #[serde(skip)] here
+    pub current_tables: HashMap<String, String> // Maps "logical" table name to actual table name
+}
+
+
+pub fn load_schema(config: &DatabaseConfig) -> Result<Schema> {
+    let schema_path = config.db_dir.join(&config.schema_file);
+    if !schema_path.exists() {
+        let default_schema = Schema::default();
+        save_schema(&default_schema, config)?;
+        return Ok(default_schema);
+    }
+
+    let file = File::open(&schema_path)?;
+    let reader = BufReader::new(file);
+
+    match serde_json::from_reader(reader) {
+        Ok(schema) => {
+            let mut schema:Schema = schema;
+            schema.current_tables = HashMap::new();
+            Ok(schema)
+        },
+        Err(err) => {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Failed to parse schema file: {}", err),
+            ));
+        }
+    }
+}
+
+pub fn save_schema(schema: &Schema, config: &DatabaseConfig) -> Result<()> {
+    let schema_path = config.db_dir.join(&config.schema_file);
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&schema_path)?;
+    serde_json::to_writer_pretty(file, schema)?;
+    Ok(())
+}
+
+pub fn create_table(schema: &mut Schema, table: Table, config: &DatabaseConfig) -> Result<()> {
+    let initial_table_name = format!("{}_initial", table.name);
+    let updates_table_name = format!("{}_updates", table.name);
+
+    // Create the initial table
+    let mut initial_table = table.clone();
+    initial_table.name = initial_table_name.clone();
+
+    //Force UUID as the first column
+    let uuid_column = Column {
+        name: "UUID".to_string(),
+        data_type: DataType::UUID,
+        rules: vec![],
+    };
+
+    // Always insert UUID at the *beginning* of the column list
+    initial_table.columns.insert(0, uuid_column.clone()); // Insert, not replace
+
+
+    schema.tables.insert(initial_table_name.clone(), initial_table.clone());
+
+    // Create the updates table (columns should match the initial table, potentially with added metadata like a version or timestamp)
+    let mut updates_table = table.clone();
+    updates_table.name = updates_table_name.clone();
+
+    //Ensure UUID is first column
+    updates_table.columns.insert(0, uuid_column);
+    // Optionally add version/timestamp column to updates_table here
+    schema.tables.insert(updates_table_name.clone(), updates_table);
+
+    // Update the current table pointer
+    schema.current_tables.insert(table.name.clone(), initial_table_name.clone());  // Start pointing to the initial table
+
+    save_schema(schema, config)?;
+    Ok(())
+}
+
+
+
+pub fn check_column_rules(column: &Column, value: &str) -> Result<Option<String>> {
+    for rule in &column.rules {
+        let mut final_value = Some(value.to_string());  // Default, keep original value
+
+        match rule.rule_type {
+            RuleType::NotNull => {
+                if value.is_empty() {
+                    match &rule.action {
+
+                        RuleAction::SetNull => { final_value = None},
+                        RuleAction::SetDefault(default_value) => { final_value = Some(default_value.clone())},
+                        RuleAction::Reject => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "NotNull constraint violated",
+                            ));
+                        }
+                    }
+                }
+            }
+            RuleType::Unique => {/*Add unique handling if needed */}
+            // Handle other rule types here...
+
+        }
+
+        if final_value.is_none() || final_value.as_ref().unwrap().is_empty() {
+            return Ok(None);
+        } else {
+            return Ok(Some(final_value.unwrap()));
+        }
+    }
+    Ok(Some(value.to_string())) // Return the original value if no rules or rules passed
+}
+
+pub fn is_valid_data_type(data_type: &DataType, value: &str) -> bool {
+    match data_type {
+        DataType::Int => value.parse::<i64>().is_ok(), // Or your desired integer type
+        DataType::String => true, // Strings are always valid (for now)
+        DataType::UUID => {
+            //Basic attempt to validate UUIDs.  Better UUID validation may be desirable.
+            uuid::Uuid::parse_str(value).is_ok()
+        },
+        // You can add validation for String length, format, etc. here
+    }
+}
+
+pub fn get_column_names_from_schema(state: &web::Data<AppState>, table_name: &String) -> Result<Vec<String>> {
+    let schema = state.schema.lock().unwrap();
+    //Use current_tables to resolve the actual table name
+    let actual_table_name = schema.current_tables.get(table_name).unwrap_or(table_name);
+
+    if let Some(table) = schema.tables.get(actual_table_name) {
+        let column_names: Vec<String> = table.columns.iter().map(|col| col.name.clone()).collect();
+        Ok(column_names)
+    } else {
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Table not found"))
+    }
+}
+
+###############
+table.rs:
+
+// Table.rs
+
+use crate::schema::{schema::create_table as schema_create_table,
+                    schema::DataType as SchemaDataType, //Alias our data type
+                    schema::Table,
+                    schema::check_column_rules,
+                    schema::is_valid_data_type};
+use crate::AppState;
+use actix_web::{get, web, HttpResponse, Responder};
+use std::fs::{metadata, File, OpenOptions};
+use std::io::{BufRead, BufReader, Result, Write};
+use std::path::Path;
+use uuid::Uuid as ExternalUuid; // Import uuid::Uuid as ExternalUuid
+use crate::query::parser::{Identifier, DataType as ParserDataType};  //Import Parser Data Type
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
+    let mut schema = state.schema.lock().unwrap();
+    schema_create_table(&mut schema, table.clone(), &state.config)?;
+    drop(schema); // Release the lock on schema early
+
+    //No longer creates the file here, this is done by the create_table function in schema.rs
+    //It is important to note that each table has a table file now, but the name of the file is table_initial or table_updates
+    Ok(())
+}
+
+pub fn insert_row(
+    table_name: &str,
+    row_data: Vec<Identifier>,
+    columns: Option<Vec<Identifier>>,
+    state: &web::Data<AppState>,
+) -> Result<()> {
+    let mut schema = state.schema.lock().unwrap();
+
+    //Determine if the table is initial or updates
+    let actual_table_name = schema.current_tables.get(table_name)
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Table not found in schema"
+        ))?.clone(); // Clone the String to avoid borrowing issues
+
+    let table = schema.tables.get(&actual_table_name)
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Table not found in schema"
+        ))?.clone();
+
+    // Write to the updates table
+    let initial_table_name = format!("{}_initial", table_name);
+    let updates_table_name = format!("{}_updates", table.name);
+
+    let mut file: File;
+    // If the table is not yet initiated into the initial table, then populate the table
+    let initial_table_path = Path::new(state.config.db_dir.as_path())
+        .join(state.config.table_dir.as_path())
+        .join(initial_table_name);
+
+    if !metadata(&initial_table_path).is_ok() { // If the table_initial is empty, create it, add base row and new col
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&initial_table_path)?;
+
+        let mut processed_row_data: Vec<String> = Vec::new();
+        // Inject UUID If no columns specified, ensure this is the first if there are no columns specified
+        let mut final_row_data = row_data.clone();
+        if columns.is_none() {
+            let uuid = Identifier::Literal(ExternalUuid::new_v4().to_string(), Some(ParserDataType::UUID)); // Use ParserDataType
+            final_row_data.insert(0, uuid);
+        }
+
+        // Validate columns and data lengths
+
+        let mut serialized_row = String::new();
+        if let Some(cols) = &columns {
+            for (i, col_name) in cols.iter().enumerate() {
+                let col = table.columns.iter().find(|c| c.name == extract_column_name(col_name).as_str()).unwrap();
+                let value = &final_row_data[i];
+
+                let value_string = extract_literal_value(value); // Extract the string representation of the value
+                if !is_valid_data_type(&col.data_type, &value_string) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid data type for column: {}", extract_column_name(col_name))
+                    ));
+                }
+                match check_column_rules(col, &value_string) {
+                    Ok(Some(val)) => processed_row_data.push(val),
+                    Ok(None) => processed_row_data.push(String::new()),
+                    Err(e) => return Err(e),
+                }
+            }
+        } else {
+            for (_i, (value, col)) in final_row_data.iter().zip(table.columns.iter()).enumerate() {
+                let value_string = extract_literal_value(value); // Extract the string representation of the value
+                if !is_valid_data_type(&col.data_type, &value_string) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid data type for column: {}", col.name)
+                    ));
+                }
+                match check_column_rules(col, &value_string) {
+                    Ok(Some(val)) => processed_row_data.push(val),
+                    Ok(None) => processed_row_data.push(String::new()),
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        for (i, value) in processed_row_data.iter().enumerate() {
+            if i > 0 {
+                serialized_row.push(',');
+            }
+            serialized_row.push_str(value);
+        }
+        writeln!(file, "{}", serialized_row)?;
+
+    } else {
+        let updates_table_name = format!("{}_updates", table_name);
+
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&Path::new(state.config.db_dir.as_path())
+                .join(state.config.table_dir.as_path())
+                .join(updates_table_name))?;
+        // Validate columns and data lengths
+        let mut final_row_data = row_data.clone();
+        if let Some(cols) = &columns {
+            if cols.len() != final_row_data.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "The number of columns specified does not equal the number of values given"
+                ));
+            }
+
+            for (i, col_name) in cols.iter().enumerate() {
+                if !table.columns.iter().any(|c| extract_column_name(col_name).as_str() == c.name) { // Swapped the order and fixed the types
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Column {} does not exist in table {}", extract_column_name(col_name), table_name)
+                    ));
+                }
+            }
+
+        } else if final_row_data.len() != table.columns.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Data length mismatch"
+            ));
+        }
+
+        let mut initial_index = 0;
+        let mut serialized_row = String::new();
+
+        let mut processed_row_data: Vec<String> = Vec::new();
+
+        if let Some(cols) = &columns {
+            for (i, col_name) in cols.iter().enumerate() {
+                let col = table.columns.iter().find(|c| c.name == extract_column_name(col_name).as_str()).unwrap();
+                let value = &final_row_data[i];
+
+                let value_string = extract_literal_value(value); // Extract the string representation of the value
+                if !is_valid_data_type(&col.data_type, &value_string) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid data type for column: {}", extract_column_name(col_name))
+                    ));
+                }
+                match check_column_rules(col, &value_string) {
+                    Ok(Some(val)) => processed_row_data.push(val),
+                    Ok(None) => processed_row_data.push(String::new()),
+                    Err(e) => return Err(e),
+                }
+            }
+        } else {
+            for (_i, (value, col)) in final_row_data.iter().zip(table.columns.iter()).enumerate() {
+                let value_string = extract_literal_value(value); // Extract the string representation of the value
+                if !is_valid_data_type(&col.data_type, &value_string) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid data type for column: {}", col.name)
+                    ));
+                }
+                match check_column_rules(col, &value_string) {
+                    Ok(Some(val)) => processed_row_data.push(val),
+                    Ok(None) => processed_row_data.push(String::new()),
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        serialized_row.push_str(&initial_index.to_string());
+        serialized_row.push(',');
+
+        for (i, value) in processed_row_data.iter().enumerate() {
+            if i > 0 {
+                serialized_row.push(',');
+            }
+            serialized_row.push_str(value);
+        }
+        writeln!(file, "{}", serialized_row)?;
+    }
+    drop(schema);
+    Ok(())
+}
+
+pub(crate) async fn get_table_data(state: web::Data<AppState>, table_name: &str) -> std::result::Result<Vec<Vec<String>>, std::io::Error> {
+    let schema = state.schema.lock().unwrap();
+    // Resolve the actual table name
+    let actual_table_name = schema.current_tables.get(table_name)
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Table not found in schema"
+        ))?.clone();
+
+    // Fetch data from the initial table
+    let initial_table_name = format!("{}_initial", table_name);
+    let initial_table_data = match schema.tables.get(&initial_table_name) {
+        Some(_) => {
+            let table_path = state.config.db_dir.join(state.config.table_dir.as_path()).join(initial_table_name);
+            load_table_data_from_file(&table_path)?
+        }
+        None => Vec::new(), //Or return an error, depending on how you want to handle missing initial data
+    };
+
+    // Fetch updates and apply them
+    let updates_table_name = format!("{}_updates", table_name);
+    let updates_table_data = match schema.tables.get(&updates_table_name) {
+        Some(_) => {
+            let table_path = state.config.db_dir.join(state.config.table_dir.as_path()).join(updates_table_name);
+            load_table_data_from_file(&table_path)?
+        }
+        None => Vec::new(),
+    };
+
+    drop(schema);
+    // Apply updates to initial data to get current view
+    let current_table_data = apply_updates(initial_table_data, updates_table_data);
+
+    Ok(current_table_data)
+}
+
+fn load_table_data_from_file(table_path: &Path) -> Result<Vec<Vec<String>>> {
+    let file = File::open(table_path)?;
+    let reader = BufReader::new(file);
+    let mut table_data = Vec::new();
+    for line_result in reader.lines() {
+        if let Ok(line) = line_result {
+            let row_values: Vec<String> = line.split(',').map(|s| s.trim_matches('"').to_string()).collect();
+            table_data.push(row_values);
+        } else {
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "Error reading a line"));
+        }
+    }
+    Ok(table_data)
+}
+
+fn apply_updates(initial_data: Vec<Vec<String>>, updates: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    use std::collections::HashMap;
+
+    let mut current_data: HashMap<usize, Vec<String>> = initial_data
+        .into_iter()
+        .enumerate()
+        .collect();
+
+    // Process updates and track current state
+    let mut most_recent_updates: HashMap<usize,  Vec<String>> = HashMap::new(); // initial_index -> (update_index, data)
+
+    for (update_index, update) in updates.iter().enumerate() {
+        if update.len() < 2 {
+            continue; // Skip invalid update rows
+        }
+
+        let initial_index = match update[0].parse::<usize>() {
+            Ok(index) => index,
+            Err(_) => continue, // Skip invalid initial index
+        };
+        most_recent_updates.insert(initial_index,  update[1..].to_vec());
+
+    }
+    // Merge initial data with most recent updates
+    let mut final_data: Vec<Vec<String>> = Vec::new();
+    for (initial_index, initial_row) in current_data.iter() {
+        if let Some( update_data) = most_recent_updates.get(initial_index) {
+            // Merge the update into the initial row (update only the columns present in the update)
+            let mut merged_row = initial_row.clone();
+            for (i, value) in update_data.iter().enumerate() {
+                if i < merged_row.len() {
+                    merged_row[i] = value.clone();
+                } else {
+                    merged_row.push(value.clone()); // Add value to end of row
+                }
+            }
+            final_data.push(merged_row);
+        } else {
+            final_data.push(initial_row.clone());
+        }
+    }
+    final_data
+}
+
+pub(crate) fn extract_literal_value(identifier: &Identifier) -> String {
+    match identifier {
+        Identifier::Literal(value, _) => value.clone(),
+        Identifier::Name(name) => name.clone(),
+        Identifier::Star => "*".to_string(), // Or handle this differently
+    }
+}
+
+fn extract_column_name(identifier: &Identifier) -> String {
+    match identifier {
+        Identifier::Name(name) => name.clone(),
+        _ => panic!("Expected Identifier::Name"),  // Handle this more gracefully in production
+    }
+}
+
+
+########
+
+Parser.rs:
+
+// Parser.rs
+
+use serde::{Deserialize, Serialize};
+use std::str;
+use uuid::Uuid;
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+pub enum Identifier {
+    // Represents identifiers like column names, table names, etc.
+    Name(String),
+    // Represents literals like numbers or strings, with an optional data type.
+    Literal(String, Option<DataType>), // Add Option<DataType> here
+    // Represents * in SELECT statements.
+    Star,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+pub enum DataType { //Make sure this exists here too
+    Int,
+    String,
+    UUID,
+}
+
+impl From<&str> for DataType {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "int" | "integer" => DataType::Int,
+            "string" | "text" | "varchar" => DataType::String,  // Handle common string type names
+            "uuid" => DataType::UUID,
+            _ => panic!("Unsupported data type: {}", s), // Or handle with a Result
+        }
+    }
+}
+
+
+#[derive(Serialize,Deserialize,Debug, PartialEq, Eq, Clone)]
+pub enum Expression {
+    Comparison {
+        left: Identifier,
+        operator: String,
+        right: Identifier,
+    },
+}
+
+
+// Abstract Syntax Trees, Needed for possible valid parsing,
+// If Query strings transform into a valid AST Node
+// The Executer will then action it.
+#[derive(Debug, Serialize, Deserialize,PartialEq, Eq,Clone)]
+pub enum ASTNode {
+    Select { columns: Vec<Identifier> },
+    From { table: Identifier },
+    Where { condition: Expression },
+    Insert { table: Identifier, values: Vec<Identifier>, columns: Vec<Identifier> },
+    Update { table: Identifier, values: Vec<(Identifier, Identifier)> },
+    Delete { table: Identifier },
+    Create { table: Identifier, columns: Vec<(Identifier, Identifier)> },
+}
+
+#[derive(Deserialize, Serialize,Debug, Clone)]
+pub struct ASTNodes(pub Vec<ASTNode>);
+
+fn is_uuid(s: &str) -> bool {
+    Uuid::parse_str(s).is_ok()
+}
+
+
+pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
+    let query_str = str::from_utf8(query_bytes).map_err(|e| e.to_string())?;
+    // Improved and FINAL Tokenization (No re-tokenizing!)
+    let mut tokens = Vec::new();
+    let mut in_string = false;
+    let mut current_token = String::new();
+
+    for char in query_str.chars() {
+        if char == '"' {
+            in_string = !in_string;
+            current_token.push(char);
+            if !in_string {
+                tokens.push(current_token.clone());
+                current_token.clear();
+            }
+        } else if in_string {
+            current_token.push(char);
+        } else if char == '(' || char == ')' || char == ',' {
+            if !current_token.is_empty() {
+                tokens.push(current_token.clone());
+                current_token.clear();
+            }
+            tokens.push(char.to_string());
+        } else if char.is_whitespace() {
+            if !current_token.is_empty() {
+                tokens.push(current_token.clone());
+                current_token.clear();
+            }
+        } else {
+            current_token.push(char);
+        }
+    }
+    if !current_token.is_empty() {
+        tokens.push(current_token);
+    }
+
+    if tokens.is_empty() {
+        return Err("Query is empty".to_string());
+    }
+
+    let mut ast_nodes = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "SELECT" => {
+                let mut columns = Vec::new();
+                index += 1;
+                while index < tokens.len() && tokens[index] != "FROM" {
+                    let identifier = if tokens[index] == "*" {
+                        Identifier::Star
+                    } else {
+                        Identifier::Name(tokens[index].to_string())
+                    };
+                    columns.push(identifier);
+                    index += 1;
+                }
+                ast_nodes.push(ASTNode::Select { columns });
+            }
+            "FROM" => {
+                index += 1;
+                if index < tokens.len() {
+                    let table = Identifier::Name(tokens[index].to_string());
+
+                    ast_nodes.push(ASTNode::From { table });
+                    index += 1;
+                } else {
+                    return Err("Expected table name after FROM".to_string());
+                }
+            }
+            "WHERE" => {
+                index += 1;
+                if index < tokens.len() {
+                    // Basic comparison expression parsing
+                    let left = Identifier::Name(tokens[index].to_string());
+                    index += 1; // Skip left operand
+                    let operator = tokens[index].to_string();
+                    index += 1;  // Skip operator
+                    // Updated to use the new literal parsing logic:
+                    let right_token = tokens[index].to_string();
+                    let right = if is_uuid(&right_token) {
+                        Identifier::Literal(right_token, Some(DataType::UUID))
+                    } else {
+                        Identifier::Literal(right_token, None)
+                    };
+                    index += 1;
+
+                    let condition = Expression::Comparison {
+                        left,
+                        operator,
+                        right,
+                    };
+                    ast_nodes.push(ASTNode::Where { condition });
+                } else {
+                    return Err("Expected condition after WHERE".to_string());
+                }
+            }
+            "CREATE" => {
+                index += 1;
+                if index < tokens.len() && tokens[index] == "TABLE" {
+                    index += 1;
+                    if index < tokens.len() {
+                        let table = Identifier::Name(tokens[index].clone());
+                        index += 1;
+
+                        if index < tokens.len() && tokens[index] == "(" {
+                            index += 1;
+                            let mut columns = Vec::new();
+
+                            while index < tokens.len() && tokens[index] != ")" {
+                                let column_name = Identifier::Name(tokens[index].clone());
+                                index += 1;
+
+                                // Check for column type or end of columns
+                                if index < tokens.len() && tokens[index] != "," && tokens[index] != ")" {
+                                    let column_type = Identifier::Name(tokens[index].clone());
+                                    columns.push((column_name, column_type));
+                                    index += 1;
+                                } else {
+                                    return Err("Invalid column definition".to_string()); // Missing type
+                                }
+
+                                if index < tokens.len() && tokens[index] == "," {
+                                    index += 1;
+                                }
+                            }
+
+
+                            if index < tokens.len() {
+                                if tokens[index] == ")" {
+                                    index += 1;
+                                    ast_nodes.push(ASTNode::Create { table, columns });
+                                } else {
+                                    return Err("Expected ')' or ',' after column definition".to_string());
+                                }
+                            } else {
+                                return Err("Expected ')' after column definitions".to_string());
+                            }
+
+                        } else {
+                            return Err("Expected '(' after table name".to_string());
+                        }
+                    } else {
+                        return Err("Expected table name after CREATE TABLE".to_string());
+                    }
+                } else {
+                    return Err("Expected TABLE after CREATE".to_string());
+                }
+            }
+            "INSERT" => {
+                index += 1;
+                if index < tokens.len() && tokens[index] == "INTO" {
+                    index += 1;
+                    if index < tokens.len() {
+                        let table = Identifier::Name(tokens[index].clone());
+                        index += 1;
+
+                        let mut columns = Vec::new();
+                        if index < tokens.len() && tokens[index] == "(" {
+                            index += 1;
+                            while index < tokens.len() && tokens[index] != ")" {
+                                columns.push(Identifier::Name(tokens[index].clone()));
+                                index += 1;
+                                if index < tokens.len() && tokens[index] == "," {
+                                    index += 1;
+                                }
+                            }
+                            if index < tokens.len() && tokens[index] == ")" {
+                                index += 1;
+                            } else {
+                                return Err("Expected ')' after column list".to_string());
+                            }
+                        }
+
+                        if index < tokens.len() && tokens[index] == "VALUES" {
+                            index += 1;
+                            if index < tokens.len() && tokens[index] == "(" {
+                                index += 1;
+                                let mut values = Vec::new();
+                                while index < tokens.len() && tokens[index] != ")" {
+                                    let value_token = tokens[index].clone();
+
+                                    let identifier = if is_uuid(&value_token) {
+                                        Identifier::Literal(value_token, Some(DataType::UUID))
+                                    } else {
+                                        Identifier::Literal(value_token, None)
+                                    };
+                                    values.push(identifier); // Treat values as literals
+                                    index += 1;
+                                    if index < tokens.len() && tokens[index] == "," {
+                                        index += 1;
+                                    }
+                                }
+                                if index < tokens.len() && tokens[index] == ")" {
+                                    index += 1;
+                                    ast_nodes.push(ASTNode::Insert { table, columns, values });
+                                } else {
+                                    return Err("Expected ')' after values list".to_string());
+                                }
+                            } else {
+                                return Err("Expected '(' after VALUES".to_string());
+                            }
+                        } else {
+                            return Err("Expected VALUES after table name".to_string());
+                        }
+                    } else {
+                        return Err("Expected table name after INSERT INTO".to_string());
+                    }
+                } else {
+                    return Err("Expected INTO after INSERT".to_string());
+                }
+            }
+            _ => return Err(format!("Unexpected token: {}", tokens[index])),
+        }
+    }
+    Ok(ast_nodes)
+}
+
+###############
+
+executer.rs:
+
+// Executer.rs
+use crate::query::parser::{basic_sql_parser, ASTNode, Expression, Identifier, DataType};
+// Import your AppState
+use crate::records::table::{create_table, get_table_data, insert_row};
+use crate::schema::schema;
+use crate::schema::schema::{get_column_names_from_schema};
+use crate::AppState;
+use actix_web::{post, web, HttpRequest, HttpResponse};
+use tracing::log::{debug, info};
+use crate::records::table::extract_literal_value;
+
+// Import your table functions
+
+
+
+pub async fn execute_query(
+    ast_nodes: Vec<ASTNode>,
+    data: web::Data<AppState>,
+    _req: HttpRequest,
+) -> HttpResponse { // Previously impl Responder
+    info!("Executing query with {} AST nodes", ast_nodes.len());
+
+    let mut where_clause: Option<Expression> = None;
+
+    for i in 0..ast_nodes.len() {
+        match &ast_nodes[i] {
+            ASTNode::Select { columns } => {
+                if i + 1 < ast_nodes.len() {
+                    if let ASTNode::From { table } = &ast_nodes[i + 1] {
+                        if let Identifier::Name(table_name) = table {
+                            let table_data_result = get_table_data(data.clone(), table_name).await;
+                            match table_data_result {
+                                Ok(table_data) => {
+                                    // Check if there's a WHERE clause
+                                    if i + 2 < ast_nodes.len() {
+                                        if let ASTNode::Where { condition } = &ast_nodes[i + 2] {
+                                            where_clause = Some(condition.clone());
+                                        }
+                                    }
+
+                                    let result = process_select(columns, &table_data, data.clone(), table_name, where_clause.clone()).await;
+                                    if result.is_empty() {
+                                        return HttpResponse::Ok().body("No rows found");
+                                    }
+                                    match serde_json::to_string(&result) {
+                                        Ok(json) => return HttpResponse::Ok().body(json),
+                                        Err(e) => return HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
+                                    }
+                                }
+                                Err(e) => {
+                                    if e.kind() == std::io::ErrorKind::NotFound {
+                                        return HttpResponse::NotFound().body(e.to_string());
+                                    } else {
+                                        return HttpResponse::InternalServerError().body(e.to_string());
+                                    }
+                                }
+                            }
+                        } else {
+                            return HttpResponse::BadRequest().body("Invalid table name in FROM clause");
+                        }
+                    } else {
+                        return HttpResponse::BadRequest().body("FROM clause missing after SELECT");
+                    }
+                } else {
+                    return HttpResponse::BadRequest().body("FROM clause missing after SELECT");
+                }
+            }
+            ASTNode::Create { table, columns } => {
+                if let Identifier::Name(table_name) = table {
+                    let table = schema::Table {
+                        name: table_name.to_string(),
+                        columns: columns
+                            .iter()
+                            .map(|(name, col_type)| {
+                                if let (Identifier::Name(col_name), Identifier::Name(type_name)) =
+                                    (name, col_type)
+                                {
+                                    let data_type = schema::DataType::from(type_name.as_str()); // Direct conversion
+                                    schema::Column {
+                                        name: col_name.clone(),
+                                        data_type,
+                                        rules: vec![],
+                                    }
+                                } else {
+                                    panic!("Invalid column definition");
+                                }
+                            })
+                            .collect(),
+                    };
+
+                    match create_table(&table, &data) {
+                        Ok(_) => return HttpResponse::Ok().body("Table Created"),
+                        Err(err) => return HttpResponse::InternalServerError()
+                            .body(format!("Error creating table: {}", err)),
+                    }
+                } else {
+                    return HttpResponse::BadRequest().body("Invalid table name in CREATE TABLE");
+                }
+            }
+
+            ASTNode::Insert { table, values, columns } => {
+                debug!("Insert statement: {:?}", ast_nodes);
+                if let Identifier::Name(table_name) = table {
+                    debug!("Entered the if let Identifier::Name(table_name) = table");
+
+                    let columns_opt = if columns.is_empty() {
+                        None
+                    } else {
+                        Some(columns.clone())
+                    };
+                    debug!("attempted to insert row");
+                    match insert_row(table_name, values.clone(), columns_opt, &data) {
+                        Ok(_) => return HttpResponse::Ok().body("Row inserted"),
+                        Err(err) => return HttpResponse::InternalServerError().body(format!("Error inserting row: {}", err)),
+                    }
+                } else {
+                    return HttpResponse::BadRequest().body("Invalid table name in INSERT statement");
+                }
+            }
+
+            ASTNode::Where { condition } => {
+                return HttpResponse::BadRequest().body("WHERE clause without SELECT/FROM");
+                //this is handled above now
+            }
+            // Handle other AST nodes as needed
+            _ => return HttpResponse::BadRequest().body("Unsupported AST Node type"),
+        }
+    }
+    HttpResponse::BadRequest().body("No valid SQL query provided")
+}
+
+async fn process_select(columns: &[Identifier], table_data: &[Vec<String>], data: web::Data<AppState>, table_name: &String, where_clause: Option<Expression>) -> Vec<Vec<String>> {
+    let mut result = Vec::new();
+
+    // Check if table_data is empty
+    if table_data.is_empty() {
+        return result; // Return an empty result if there's no data
+    }
+
+    let column_names = match get_column_names_from_schema(&data, table_name) {
+        Ok(names) => names,
+        Err(_) => return result, // Return an empty result if can't get column names
+    };
+
+    for row in table_data {
+        if where_clause.is_none() || evaluate_where_clause(&where_clause.clone().unwrap(), row, &column_names) {
+            let mut selected_row = Vec::new();
+            for col in columns {
+                match col {
+                    Identifier::Name(col_name) => {
+                        if let Some(index) = find_column_index(&column_names, col_name.as_str()) { //Corrected line
+                            if let Some(value) = row.get(index) {
+                                selected_row.push(value.to_string());
+                            }
+                        }
+                    }
+                    Identifier::Star => selected_row.extend_from_slice(row),
+                    _ => (),
+                }
+            }
+            result.push(selected_row);
+        }
+    }
+    result
+}
+
+fn evaluate_where_clause(condition: &Expression, row: &[String], column_names: &[String]) -> bool {
+    match condition {
+        Expression::Comparison { left, operator, right } => {
+            let left_value = match left {
+                Identifier::Name(name) => {
+                    if let Some(index) = find_column_index(column_names, name) {
+                        row.get(index).map(|s| s.to_string())
+                    } else {
+                        None // Column not found
+                    }
+                }
+                Identifier::Literal(lit, _) => Some(lit.to_string()),
+                _ => None, // Unsupported identifier type
+            };
+
+            let right_value = match right {
+                Identifier::Name(name) => {
+                    if let Some(index) = find_column_index(column_names, name) {
+                        row.get(index).map(|s| s.to_string())
+                    } else {
+                        None // Column not found
+                    }
+                }
+                Identifier::Literal(lit, _) => Some(lit.to_string()),
+                _ => None, // Unsupported identifier type
+            };
+
+            if left_value.is_none() || right_value.is_none() {
+                return false; // Unable to evaluate, treat as false
+            }
+
+            let left_val = left_value.unwrap();
+            let right_val = right_value.unwrap();
+
+            match operator.as_str() {
+                "=" => left_val == right_val,
+                "!=" => left_val != right_val,
+                ">" => left_val > right_val,
+                "<" => left_val < right_val,
+                ">=" => left_val >= right_val,
+                "<=" => left_val <= right_val,
+                _ => false, // Unsupported operator
+            }
+        }
+    }
+}
+
+
+fn find_column_index(column_names: &[String], col_name: &str) -> Option<usize> {
+    column_names.iter().position(|col| col == col_name)
+}

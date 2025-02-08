@@ -1,10 +1,17 @@
 use actix_web::{web, App, HttpServer};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap};
 use std::io::{Result};
 use std::string::String;
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use crate::executer::executer::execute_query_endpoint;
+use crate::config::database_config::DatabaseConfig;
+use crate::records::table::get_table;
+use schema::{
+    schema::load_schema,
+    schema::Schema,
+};
 
 // Module Imports.
 pub mod config;
@@ -13,14 +20,6 @@ pub mod records;
 pub mod query;
 mod executer;
 
-use crate::config::database_config::DatabaseConfig;
-
-use crate::records::table::get_table;
-use schema::{
-    schema::load_schema,
-    schema::Schema,
-};
-use crate::executer::executer::execute_query_endpoint;
 
 // public constants
 pub const DB_DIR: &str = "mydb";
@@ -31,9 +30,8 @@ pub const TABLE_DIR: &str = "tables";
 pub struct AppState {
     pub schema: Arc<Mutex<Schema>>,
     pub config: DatabaseConfig,
-    pub cache: Arc<Mutex<BTreeMap<String, Vec<Vec<String>>>>>
+    pub cache: Arc<Mutex<BTreeMap<String, Vec<Vec<String>>>>>, // Cache holds up-to-date data.
 }
-
 
 fn init_database(config: &DatabaseConfig) -> Result<()> {
     std::fs::create_dir_all(&config.db_dir)?;
@@ -50,21 +48,27 @@ async fn main() -> Result<()> {
     let config = DatabaseConfig::default();
     init_database(&config)?;
     let schema = Arc::new(Mutex::new(load_schema(&config)?));
-    let cache = Arc::new(Mutex::new(BTreeMap::new()));
+    let cache = Arc::new(Mutex::new(BTreeMap::new())); // Initialize the cache.
 
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(AppState { schema: schema.clone(),
+            .app_data(web::Data::new(AppState {
+                schema: schema.clone(),
                 config: config.clone(),
-                cache: cache.clone(),}))
-            .service(get_table)
-            .service(execute_query_endpoint)
+                cache: cache.clone(),
+            }))
+            .service(get_table) // Ability to retrieve tables.
+            .service(execute_query_endpoint) // Execute queries.
     })
         .bind(("0.0.0.0", 8080))?
         .run()
         .await?;
     Ok(())
 }
+
+
+
+
 
 
 
@@ -131,8 +135,8 @@ async fn test_application() -> Result<()> {
         };
         if !schema.lock().unwrap().tables.contains_key("users") {
             create_table(&user_table, &app_state)?;
-            insert_row("users", vec!["1".to_string(), "Alice".to_string()], None,&app_state)?;
-            insert_row("users", vec!["2".to_string(), "Bob".to_string()], None ,&app_state)?;
+            insert_row("users", vec!["1".to_string(), "Alice".to_string()],&app_state)?;
+            insert_row("users", vec!["2".to_string(), "Bob".to_string()],&app_state)?;
         };
     };
 

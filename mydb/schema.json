@@ -1,8 +1,73 @@
 {
   "tables": {
-    "users": {
-      "name": "users",
+    "users_initial": {
+      "name": "users_initial",
       "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": []
+        },
+        {
+          "name": "id",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "name",
+          "data_type": "String",
+          "rules": []
+        }
+      ]
+    },
+    "test_table_updates": {
+      "name": "test_table_updates",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": []
+        },
+        {
+          "name": "number",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "text",
+          "data_type": "String",
+          "rules": []
+        }
+      ]
+    },
+    "test_table_initial": {
+      "name": "test_table_initial",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": []
+        },
+        {
+          "name": "number",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "text",
+          "data_type": "String",
+          "rules": []
+        }
+      ]
+    },
+    "users_updates": {
+      "name": "users_updates",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": []
+        },
         {
           "name": "id",
           "data_type": "Int",

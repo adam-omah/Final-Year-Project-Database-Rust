@@ -1,12 +1,15 @@
+use std::collections::HashMap;
+use std::path::Path;
 use crate::query::parser::{basic_sql_parser, ASTNode, Expression, Identifier};
-// Import your AppState
-use crate::records::table::{create_table, get_table_data, insert_row};
+use crate::records::table::{create_table, get_table_data, insert_row, load_table_data_from_file, recalculate_current, update_row};
 use crate::schema::schema;
-use crate::schema::schema::{get_column_names_from_schema, DataType};
-use crate::AppState;
+use crate::schema::schema::{get_column_names_from_schema};
+use crate::{AppState};
 use actix_web::{post, web, HttpRequest, HttpResponse};
 use tracing::log::{debug, info};
-
+use uuid::Uuid;
+use crate::query::parser;
+use crate::records::table::extract_literal_value;
 
 // Import your table functions
 
@@ -16,10 +19,10 @@ pub async fn execute_query(
     ast_nodes: Vec<ASTNode>,
     data: web::Data<AppState>,
     _req: HttpRequest,
-) -> HttpResponse { // Previously impl Responder
+) -> HttpResponse {
     info!("Executing query with {} AST nodes", ast_nodes.len());
 
-    let mut where_clause: Option<Expression> = None;
+    let mut where_clause: Option<Expression> = None; // Store the WHERE clause (if any)
 
     for i in 0..ast_nodes.len() {
         match &ast_nodes[i] {
@@ -27,35 +30,73 @@ pub async fn execute_query(
                 if i + 1 < ast_nodes.len() {
                     if let ASTNode::From { table } = &ast_nodes[i + 1] {
                         if let Identifier::Name(table_name) = table {
-                            let table_data_result = get_table_data(data.clone(), table_name).await;
-                            match table_data_result {
-                                Ok(table_data) => {
-                                    // Check if there's a WHERE clause
-                                    if i + 2 < ast_nodes.len() {
-                                        if let ASTNode::Where { condition } = &ast_nodes[i + 2] {
-                                            where_clause = Some(condition.clone());
-                                        }
+                            // Load initial data for recalculate_current
+                            let initial_table_name = format!("{}_initial", table_name);
+                            let initial_table_path = Path::new(&data.config.db_dir)
+                                .join(&data.config.table_dir)
+                                .join(&initial_table_name);
+                            let initial_data_result = load_table_data_from_file(&initial_table_path);
+
+                            match initial_data_result {
+                                Ok(initial_data) => {
+                                    // Recalculate current data (if necessary)
+                                    if let Err(e) =
+                                        recalculate_current(&data, table_name, initial_data.clone()).await
+                                    {
+                                        eprintln!("Error in recalculate_current: {}", e);
+                                        // Consider returning an error response here if recalculation is critical
                                     }
 
-                                    let result = process_select(columns, &table_data, data.clone(), table_name, where_clause.clone()).await;
-                                    if result.is_empty() {
-                                        return HttpResponse::Ok().body("No rows found");
-                                    }
-                                    match serde_json::to_string(&result) {
-                                        Ok(json) => return HttpResponse::Ok().body(json),
-                                        Err(e) => return HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
+                                    let table_data_result = get_table_data(data.clone(), table_name).await;
+
+                                    match table_data_result {
+                                        Ok(table_data) => {
+                                            // Check for a WHERE clause
+                                            if i + 2 < ast_nodes.len() {
+                                                if let ASTNode::Where { condition } = &ast_nodes[i + 2] {
+                                                    where_clause = Some(condition.clone());
+                                                }
+                                            }
+
+                                            let result = process_select(
+                                                columns,
+                                                &table_data,
+                                                data.clone(),
+                                                table_name,
+                                                where_clause.clone(),
+                                            )
+                                                .await;
+
+                                            if result.is_empty() {
+                                                return HttpResponse::Ok().body("No rows found");
+                                            }
+
+                                            match serde_json::to_string(&result) {
+                                                Ok(json) => return HttpResponse::Ok().body(json),
+                                                Err(e) => {
+                                                    return HttpResponse::InternalServerError()
+                                                        .body(format!("Serialization error: {}", e))
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if e.kind() == std::io::ErrorKind::NotFound {
+                                                return HttpResponse::NotFound().body(e.to_string());
+                                            } else {
+                                                return HttpResponse::InternalServerError().body(e.to_string());
+                                            }
+                                        }
                                     }
                                 }
                                 Err(e) => {
-                                    if e.kind() == std::io::ErrorKind::NotFound {
-                                        return HttpResponse::NotFound().body(e.to_string());
-                                    } else {
-                                        return HttpResponse::InternalServerError().body(e.to_string());
-                                    }
+                                    eprintln!("Failed to load initial data: {}", e);
+                                    return HttpResponse::InternalServerError()
+                                        .body(format!("Failed to load initial data: {}", e));
                                 }
                             }
                         } else {
-                            return HttpResponse::BadRequest().body("Invalid table name in FROM clause");
+                            return HttpResponse::BadRequest()
+                                .body("Invalid table name in FROM clause");
                         }
                     } else {
                         return HttpResponse::BadRequest().body("FROM clause missing after SELECT");
@@ -64,119 +105,200 @@ pub async fn execute_query(
                     return HttpResponse::BadRequest().body("FROM clause missing after SELECT");
                 }
             }
+
+
+            // Handle CREATE TABLE statement
             ASTNode::Create { table, columns } => {
                 if let Identifier::Name(table_name) = table {
+                    // Map columns to schema::Column, extracting name and data type
                     let table = schema::Table {
                         name: table_name.to_string(),
                         columns: columns
                             .iter()
-                            .map(|(name, col_type)| {
-                                if let (Identifier::Name(col_name), Identifier::Name(type_name)) =
-                                    (name, col_type)
+                            .filter_map(|(name, col_type)| {
+                                if let (Identifier::Name(col_name), Identifier::Name(type_name)) = (name, col_type)
                                 {
-                                    let data_type = DataType::from(type_name.as_str()); // Direct conversion
-                                    schema::Column {
-                                        name: col_name.clone(),
+                                    let data_type = schema::DataType::from(type_name.as_str()); // Convert type name to DataType
+                                    Some(schema::Column {
+                                        name: col_name.clone(), // Extract column name
                                         data_type,
                                         rules: vec![],
-                                    }
+                                    })
                                 } else {
-                                    panic!("Invalid column definition");
+                                    None // Skip invalid/unsupported columns
                                 }
                             })
                             .collect(),
                     };
 
+                    // Try to create the table
                     match create_table(&table, &data) {
                         Ok(_) => return HttpResponse::Ok().body("Table Created"),
-                        Err(err) => return HttpResponse::InternalServerError()
-                            .body(format!("Error creating table: {}", err)),
+                        Err(err) => {
+                            return HttpResponse::InternalServerError()
+                                .body(format!("Error creating table: {}", err))
+                        }
                     }
                 } else {
                     return HttpResponse::BadRequest().body("Invalid table name in CREATE TABLE");
                 }
             }
 
+            // Handle INSERT statement
             ASTNode::Insert { table, values, columns } => {
-                debug!("Insert statement: {:?}", ast_nodes);
                 if let Identifier::Name(table_name) = table {
-                    debug!("Entered the if let Identifier::Name(table_name) = table");
-                    let values_string: Vec<String> = values
+                    // Convert values: Vec<Identifier> to Vec<String>
+                    let mut row_data: Vec<String> = values
                         .iter()
-                        .map(|v| {
-                            if let Identifier::Literal(lit) = v {
-                                // Remove quotes from string literals if present
-                                let cleaned_lit = if lit.starts_with('"') && lit.ends_with('"') {
-                                    lit[1..lit.len() - 1].to_string()
-                                } else {
-                                    lit.to_string()
-                                };
-                                cleaned_lit
-                            } else {
-                                panic!("Invalid literal value in INSERT") // Or handle the error as needed
-                            }
+                        .filter_map(|value| match value {
+                            Identifier::Literal(lit, _) => Some(lit.clone()), // Grab the value for literals
+                            _ => None, // Ignore invalid types (e.g., non-literal identifiers)
                         })
                         .collect();
 
-                    let columns_opt = if columns.is_empty() {
-                        None
+                    // Generate a UUID for rows if needed and prepend to row_data
+                    let uuid = Uuid::new_v4().to_string();
+                    row_data.insert(0, uuid); // Insert UUID as the first column (if schema requires it)
+
+                    // Validate and handle column names (if provided)
+                    let column_names: Option<Vec<String>> = if columns.is_empty() {
+                        None // No columns provided
                     } else {
-                        Some(columns.into_iter().filter_map(|c| {
-                            if let Identifier::Name(name) = c {
-                                Some(name.to_string())
-                            } else {
-                                None // Or handle the unexpected Identifier type as needed (e.g., log a warning, return an error)
-                            }
-                        }).collect())
+                        // Convert columns: Vec<Identifier> to Option<Vec<String>>
+                        Some(
+                            columns
+                                .iter()
+                                .filter_map(|col| match col {
+                                    Identifier::Name(col_name) => Some(col_name.clone()), // Grab column names
+                                    _ => None, // Ignore invalid types
+                                })
+                                .collect(),
+                        )
                     };
-                    debug!("attempted to insert row");
-                    match insert_row(table_name, values_string, columns_opt, &data) {
+
+                    // Call insert_row with updated row_data (including UUID)
+                    match insert_row(table_name.as_str(), row_data, &data) {
                         Ok(_) => return HttpResponse::Ok().body("Row inserted"),
-                        Err(err) => return HttpResponse::InternalServerError().body(format!("Error inserting row: {}", err)),
+                        Err(err) => {
+                            return HttpResponse::InternalServerError()
+                                .body(format!("Error inserting row: {}", err))
+                        }
                     }
                 } else {
                     return HttpResponse::BadRequest().body("Invalid table name in INSERT statement");
                 }
             }
+            ASTNode::Update { table, values } => { // No 'condition' here
+                if let Identifier::Name(table_name) = table {
+                    let column_names = get_column_names_from_schema(&data, &table_name.to_string());
 
-            ASTNode::Where { condition } => {
-                return HttpResponse::BadRequest().body("WHERE clause without SELECT/FROM");
-                //this is handled above now
+                    let mut updated_values = HashMap::new();
+                    let mut row_id_to_update: Option<String> = None;
+
+                    for (col_identifier, val_identifier) in values {
+                        let col_name = extract_column_name(&col_identifier);
+                        let value = extract_literal_value(&val_identifier);
+
+                        if col_name == "id" { // Assumes "id" is the UUID column name.  Adjust if different.
+                            row_id_to_update = Some(value);
+                        } else {
+                            updated_values.insert(col_name, value);
+                        }
+                    }
+
+                    if let Some(uuid) = row_id_to_update {
+                        if let Err(e) = update_row(table_name, &uuid, updated_values, &data).await {
+                            return HttpResponse::InternalServerError().body(format!("Error updating row: {}", e));
+                        }
+
+                        // Load initial data for recalculate_current
+                        let initial_table_name = format!("{}_initial", table_name);
+                        let initial_table_path = Path::new(&data.config.db_dir)
+                            .join(&data.config.table_dir)
+                            .join(&initial_table_name);
+
+                        match load_table_data_from_file(&initial_table_path) {
+                            Ok(initial_data) => {
+                                // Call recalculate_current with initial_data
+                                if let Err(e) = recalculate_current(&data, table_name, initial_data).await {
+                                    return HttpResponse::InternalServerError().body(format!("Error recalculating current data: {}", e));
+                                }
+
+                                return HttpResponse::Ok().body("Row updated"); // Return Ok response here
+                            }
+                            Err(e) => {
+                                return HttpResponse::InternalServerError()
+                                    .body(format!("Error loading initial data for recalculation: {}", e));
+                            }
+                        }
+                    } else {
+                        return HttpResponse::BadRequest().body("Row ID (UUID) not provided in update statement");
+                    }
+                } else {
+                    HttpResponse::BadRequest().body("Invalid table name in UPDATE statement");
+                }
             }
+
+            // If there's a WHERE clause without a SELECT or FROM
+            ASTNode::Where { .. } => {
+                return HttpResponse::BadRequest().body("WHERE clause without SELECT/FROM");
+            }
+
             // Handle other AST nodes as needed
             _ => return HttpResponse::BadRequest().body("Unsupported AST Node type"),
         }
     }
+
     HttpResponse::BadRequest().body("No valid SQL query provided")
 }
 
-async fn process_select(columns: &[Identifier], table_data: &[Vec<String>], data: web::Data<AppState>, table_name: &str, where_clause: Option<Expression>) -> Vec<Vec<String>> {
-    let mut result = Vec::new();
+fn extract_column_name(identifier: &Identifier) -> String {
+    match identifier {
+        Identifier::Name(name) => name.to_string(),
+        Identifier::Literal(value, ..) => value.to_string(),
+        &parser::Identifier::Star => todo!(), // Or handle literal column names if needed
+    }
+}
 
+
+
+async fn process_select(
+    columns: &[Identifier],
+    table_data: &[Vec<String>],
+    data: web::Data<AppState>,
+    table_name: &String,
+    where_clause: Option<Expression>,
+) -> Vec<Vec<String>> {
+    let mut result = Vec::new();
     // Check if table_data is empty
     if table_data.is_empty() {
-        return result; // Return an empty result if there's no data
+        return result; // Return an empty result
     }
-
+    // Get column names for the table
     let column_names = match get_column_names_from_schema(&data, table_name) {
         Ok(names) => names,
-        Err(_) => return result, // Return an empty result if can't get column names
+        Err(_) => return result, // Return empty if column names can't be found
     };
-
-    for row in table_data {
+    for row in table_data.iter() {
+        // Filter rows based on WHERE clause (if present)
         if where_clause.is_none() || evaluate_where_clause(&where_clause.clone().unwrap(), row, &column_names) {
             let mut selected_row = Vec::new();
-            for col in columns {
-                match col {
-                    Identifier::Name(col_name) => {
-                        if let Some(index) = find_column_index(&column_names, col_name) {
-                            if let Some(value) = row.get(index) {
-                                selected_row.push(value.to_string());
+            if columns.len() == 1 && matches!(columns[0], Identifier::Star) {
+                // SELECT * --> add all columns from the row
+                selected_row.extend_from_slice(row);
+            } else {
+                // SELECT specific columns
+                for col in columns {
+                    match col {
+                        Identifier::Name(col_name) => {
+                            if let Some(index) = find_column_index(&column_names, col_name) {
+                                if let Some(value) = row.get(index) {
+                                    selected_row.push(value.to_string());
+                                }
                             }
                         }
+                        _ => (), // Ignore unsupported identifiers
                     }
-                    Identifier::Star => selected_row.extend_from_slice(row),
-                    _ => (),
                 }
             }
             result.push(selected_row);
@@ -185,59 +307,64 @@ async fn process_select(columns: &[Identifier], table_data: &[Vec<String>], data
     result
 }
 
-fn evaluate_where_clause(condition: &Expression, row: &[String], column_names: &[String]) -> bool {
+pub fn evaluate_where_clause(
+    condition: &Expression,
+    row: &[String],
+    column_names: &[String],
+) -> bool {
     match condition {
         Expression::Comparison { left, operator, right } => {
             let left_value = match left {
                 Identifier::Name(name) => {
-                    if let Some(index) = find_column_index(column_names, name) {
-                        row.get(index).map(|s| s.to_string())
-                    } else {
-                        None // Column not found
-                    }
+                    let index_result = find_column_index(column_names, name);
+                    index_result.and_then(|index| row.get(index).map(|s| s.to_string()))
                 }
-                Identifier::Literal(lit) => Some(lit.to_string()),
-                _ => None, // Unsupported identifier type
-            };
+                Identifier::Literal(lit, _) => {
+                    Some(lit.to_string())
+                }
+                _ => {
+                    None
 
+                }, // Unsupported identifier type
+            };
             let right_value = match right {
                 Identifier::Name(name) => {
-                    if let Some(index) = find_column_index(column_names, name) {
-                        row.get(index).map(|s| s.to_string())
-                    } else {
-                        None // Column not found
-                    }
+                    let index_result = find_column_index(column_names, name);
+                    index_result.and_then(|index| row.get(index).map(|s| s.to_string()))
                 }
-                Identifier::Literal(lit) => Some(lit.to_string()),
-                _ => None, // Unsupported identifier type
+                Identifier::Literal(lit, _) => {
+                    Some(lit.to_string())
+                }
+                _ => {
+                    None
+                }, // Unsupported identifier type
             };
-
             if left_value.is_none() || right_value.is_none() {
                 return false; // Unable to evaluate, treat as false
             }
-
             let left_val = left_value.unwrap();
             let right_val = right_value.unwrap();
-
-            match operator.as_str() {
+            let comparison_result = match operator.as_str() {
                 "=" => left_val == right_val,
                 "!=" => left_val != right_val,
                 ">" => left_val > right_val,
                 "<" => left_val < right_val,
                 ">=" => left_val >= right_val,
                 "<=" => left_val <= right_val,
-                _ => false, // Unsupported operator
-            }
+                _ => {
+                    false
+                },  // Unsupported operator
+            };
+            comparison_result
         }
     }
 }
 
 
+
 fn find_column_index(column_names: &[String], col_name: &str) -> Option<usize> {
     column_names.iter().position(|col| col == col_name)
 }
-
-
 
 #[post("/query")]
 async fn execute_query_endpoint(
@@ -261,7 +388,6 @@ async fn execute_query_endpoint(
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

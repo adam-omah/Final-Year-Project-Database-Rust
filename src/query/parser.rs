@@ -1,15 +1,37 @@
+// Parser.rs
+
 use serde::{Deserialize, Serialize};
 use std::str;
+use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 pub enum Identifier {
     // Represents identifiers like column names, table names, etc.
     Name(String),
-    // Represents literals like numbers or strings.
-    Literal(String),
+    // Represents literals like numbers or strings, with an optional data type.
+    Literal(String, Option<DataType>), // Add Option<DataType> here
     // Represents * in SELECT statements.
     Star,
 }
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+pub enum DataType { //Make sure this exists here too
+    Int,
+    String,
+    UUID,
+}
+
+impl From<&str> for DataType {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "int" | "integer" => DataType::Int,
+            "string" | "text" | "varchar" => DataType::String,  // Handle common string type names
+            "uuid" => DataType::UUID,
+            _ => panic!("Unsupported data type: {}", s), // Or handle with a Result
+        }
+    }
+}
+
 
 #[derive(Serialize,Deserialize,Debug, PartialEq, Eq, Clone)]
 pub enum Expression {
@@ -38,6 +60,9 @@ pub enum ASTNode {
 #[derive(Deserialize, Serialize,Debug, Clone)]
 pub struct ASTNodes(pub Vec<ASTNode>);
 
+fn is_uuid(s: &str) -> bool {
+    Uuid::parse_str(s).is_ok()
+}
 
 
 pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
@@ -117,7 +142,13 @@ pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
                     index += 1; // Skip left operand
                     let operator = tokens[index].to_string();
                     index += 1;  // Skip operator
-                    let right = Identifier::Literal(tokens[index].to_string());
+                    // Updated to use the new literal parsing logic:
+                    let right_token = tokens[index].to_string();
+                    let right = if is_uuid(&right_token) {
+                        Identifier::Literal(right_token, Some(DataType::UUID))
+                    } else {
+                        Identifier::Literal(right_token, None)
+                    };
                     index += 1;
 
                     let condition = Expression::Comparison {
@@ -213,7 +244,14 @@ pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
                                 index += 1;
                                 let mut values = Vec::new();
                                 while index < tokens.len() && tokens[index] != ")" {
-                                    values.push(Identifier::Literal(tokens[index].clone())); // Treat values as literals
+                                    let value_token = tokens[index].clone();
+
+                                    let identifier = if is_uuid(&value_token) {
+                                        Identifier::Literal(value_token, Some(DataType::UUID))
+                                    } else {
+                                        Identifier::Literal(value_token, None)
+                                    };
+                                    values.push(identifier); // Treat values as literals
                                     index += 1;
                                     if index < tokens.len() && tokens[index] == "," {
                                         index += 1;
@@ -246,6 +284,7 @@ pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::query::parser::DataType::String;
     use super::*;
 
     #[test]
@@ -262,7 +301,7 @@ mod tests {
                     condition: Expression::Comparison {
                         left: Identifier::Name("id".to_string()),
                         operator: "=".to_string(),
-                        right: Identifier::Literal("1".to_string())
+                        right: Identifier::Literal("1".to_string(), None)
                     }
                 },
             ]
@@ -343,8 +382,8 @@ mod tests {
                     Identifier::Name("name".to_string())
                 ],
                 values: vec![
-                    Identifier::Literal("1".to_string()),
-                    Identifier::Literal("\"John Doe\"".to_string()) // Now parsed correctly
+                    Identifier::Literal("1".to_string(), Some(String)),
+                    Identifier::Literal("\"John Doe\"".to_string(), Some(String)) // Now parsed correctly
                 ]
             }]
         );
@@ -360,8 +399,8 @@ mod tests {
                 table: Identifier::Name("users".to_string()),
                 columns: vec![], // No columns specified
                 values: vec![
-                    Identifier::Literal("1".to_string()),
-                    Identifier::Literal("\"test\"".to_string()),
+                    Identifier::Literal("1".to_string(), Some(String)),
+                    Identifier::Literal("\"test\"".to_string(), Some(String)),
                 ],
             },
         ]);

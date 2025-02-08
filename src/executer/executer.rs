@@ -1,4 +1,4 @@
-use crate::query::parser::{basic_sql_parser, ASTNode, Identifier};
+use crate::query::parser::{basic_sql_parser, ASTNode, Expression, Identifier};
 // Import your AppState
 use crate::records::table::{create_table, get_table_data, insert_row};
 use crate::schema::schema;
@@ -18,6 +18,9 @@ pub async fn execute_query(
     _req: HttpRequest,
 ) -> HttpResponse { // Previously impl Responder
     info!("Executing query with {} AST nodes", ast_nodes.len());
+
+    let mut where_clause: Option<Expression> = None;
+
     for i in 0..ast_nodes.len() {
         match &ast_nodes[i] {
             ASTNode::Select { columns } => {
@@ -27,7 +30,17 @@ pub async fn execute_query(
                             let table_data_result = get_table_data(data.clone(), table_name).await;
                             match table_data_result {
                                 Ok(table_data) => {
-                                    let result = process_select(columns, &table_data, data.clone(), table_name).await;
+                                    // Check if there's a WHERE clause
+                                    if i + 2 < ast_nodes.len() {
+                                        if let ASTNode::Where { condition } = &ast_nodes[i + 2] {
+                                            where_clause = Some(condition.clone());
+                                        }
+                                    }
+
+                                    let result = process_select(columns, &table_data, data.clone(), table_name, where_clause.clone()).await;
+                                    if result.is_empty() {
+                                        return HttpResponse::Ok().body("No rows found");
+                                    }
                                     match serde_json::to_string(&result) {
                                         Ok(json) => return HttpResponse::Ok().body(json),
                                         Err(e) => return HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
@@ -126,6 +139,10 @@ pub async fn execute_query(
                 }
             }
 
+            ASTNode::Where { condition } => {
+                return HttpResponse::BadRequest().body("WHERE clause without SELECT/FROM");
+                //this is handled above now
+            }
             // Handle other AST nodes as needed
             _ => return HttpResponse::BadRequest().body("Unsupported AST Node type"),
         }
@@ -133,7 +150,7 @@ pub async fn execute_query(
     HttpResponse::BadRequest().body("No valid SQL query provided")
 }
 
-async fn process_select(columns: &[Identifier], table_data: &[Vec<String>], data: web::Data<AppState>, table_name: &str) -> Vec<Vec<String>> {
+async fn process_select(columns: &[Identifier], table_data: &[Vec<String>], data: web::Data<AppState>, table_name: &str, where_clause: Option<Expression>) -> Vec<Vec<String>> {
     let mut result = Vec::new();
 
     // Check if table_data is empty
@@ -147,23 +164,72 @@ async fn process_select(columns: &[Identifier], table_data: &[Vec<String>], data
     };
 
     for row in table_data {
-        let mut selected_row = Vec::new();
-        for col in columns {
-            match col {
-                Identifier::Name(col_name) => {
-                    if let Some(index) = find_column_index(&column_names, col_name) {
-                        if let Some(value) = row.get(index) {
-                            selected_row.push(value.to_string());
+        if where_clause.is_none() || evaluate_where_clause(&where_clause.clone().unwrap(), row, &column_names) {
+            let mut selected_row = Vec::new();
+            for col in columns {
+                match col {
+                    Identifier::Name(col_name) => {
+                        if let Some(index) = find_column_index(&column_names, col_name) {
+                            if let Some(value) = row.get(index) {
+                                selected_row.push(value.to_string());
+                            }
                         }
                     }
+                    Identifier::Star => selected_row.extend_from_slice(row),
+                    _ => (),
                 }
-                Identifier::Star => selected_row.extend_from_slice(row),
-                _ => (),
             }
+            result.push(selected_row);
         }
-        result.push(selected_row);
     }
     result
+}
+
+fn evaluate_where_clause(condition: &Expression, row: &[String], column_names: &[String]) -> bool {
+    match condition {
+        Expression::Comparison { left, operator, right } => {
+            let left_value = match left {
+                Identifier::Name(name) => {
+                    if let Some(index) = find_column_index(column_names, name) {
+                        row.get(index).map(|s| s.to_string())
+                    } else {
+                        None // Column not found
+                    }
+                }
+                Identifier::Literal(lit) => Some(lit.to_string()),
+                _ => None, // Unsupported identifier type
+            };
+
+            let right_value = match right {
+                Identifier::Name(name) => {
+                    if let Some(index) = find_column_index(column_names, name) {
+                        row.get(index).map(|s| s.to_string())
+                    } else {
+                        None // Column not found
+                    }
+                }
+                Identifier::Literal(lit) => Some(lit.to_string()),
+                _ => None, // Unsupported identifier type
+            };
+
+            if left_value.is_none() || right_value.is_none() {
+                return false; // Unable to evaluate, treat as false
+            }
+
+            let left_val = left_value.unwrap();
+            let right_val = right_value.unwrap();
+
+            match operator.as_str() {
+                "=" => left_val == right_val,
+                "!=" => left_val != right_val,
+                ">" => left_val > right_val,
+                "<" => left_val < right_val,
+                ">=" => left_val >= right_val,
+                "<=" => left_val <= right_val,
+                _ => false, // Unsupported operator
+            }
+        }
+    }
 }
 
 

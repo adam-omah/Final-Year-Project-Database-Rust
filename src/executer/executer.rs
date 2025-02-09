@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use crate::query::parser::{basic_sql_parser, ASTNode, Expression, Identifier};
+use crate::query::parser::{sql_parser, ASTNode, Expression, Identifier};
 use crate::records::table::{create_table, get_table_data, insert_row, load_table_data_from_file, recalculate_current, update_row};
 use crate::schema::schema;
 use crate::schema::schema::{get_column_names_from_schema};
@@ -188,60 +188,98 @@ pub async fn execute_query(
                     return HttpResponse::BadRequest().body("Invalid table name in INSERT statement");
                 }
             }
-            ASTNode::Update { table, values } => { // No 'condition' here
+            ASTNode::Update { table, values } => {
                 if let Identifier::Name(table_name) = table {
-                    let column_names = get_column_names_from_schema(&data, &table_name.to_string());
-
                     let mut updated_values = HashMap::new();
-                    let mut row_id_to_update: Option<String> = None;
 
+                    // Extract column names and their updated values
                     for (col_identifier, val_identifier) in values {
                         let col_name = extract_column_name(&col_identifier);
                         let value = extract_literal_value(&val_identifier);
+                        updated_values.insert(col_name, value);
+                    }
 
-                        if col_name == "id" { // Assumes "id" is the UUID column name.  Adjust if different.
-                            row_id_to_update = Some(value);
-                        } else {
-                            updated_values.insert(col_name, value);
+                    // Check for WHERE clause
+                    let mut where_clause: Option<Expression> = None;
+                    if i + 1 < ast_nodes.len() {
+                        debug!("AstNode at index is {:#?}", &ast_nodes[i + 1]);
+                        if let ASTNode::Where { condition } = &ast_nodes[i + 1] {
+                            where_clause = Some(condition.clone());
                         }
                     }
 
-                    if let Some(uuid) = row_id_to_update {
-                        if let Err(e) = update_row(table_name, &uuid, updated_values, &data).await {
-                            return HttpResponse::InternalServerError().body(format!("Error updating row: {}", e));
-                        }
+                    // Enforce that a WHERE clause **must** exist
+                    if where_clause.is_none() {
+                        return HttpResponse::BadRequest()
+                            .body("UPDATE must include a WHERE clause with a valid UUID");
+                    }
 
-                        // Load initial data for recalculate_current
-                        let initial_table_name = format!("{}_initial", table_name);
-                        let initial_table_path = Path::new(&data.config.db_dir)
-                            .join(&data.config.table_dir)
-                            .join(&initial_table_name);
+                    // Validate that the WHERE clause specifies the UUID column
+                    let condition = where_clause.as_ref().unwrap();
+                    if !is_uuid_where_clause(condition) {
+                        return HttpResponse::BadRequest()
+                            .body(format!(
+                                "WHERE clause must contain a valid UUID condition for table '{}'",
+                                table_name
+                            ));
+                    }
 
-                        match load_table_data_from_file(&initial_table_path) {
-                            Ok(initial_data) => {
-                                // Call recalculate_current with initial_data
-                                if let Err(e) = recalculate_current(&data, table_name, initial_data).await {
-                                    return HttpResponse::InternalServerError().body(format!("Error recalculating current data: {}", e));
+                    // Load the initial table data
+                    let initial_table_name = format!("{}_initial", table_name);
+                    let initial_table_path = Path::new(&data.config.db_dir)
+                        .join(&data.config.table_dir)
+                        .join(&initial_table_name);
+
+                    match load_table_data_from_file(&initial_table_path) {
+                        Ok(initial_data) => {
+                            // Fetch column names
+                            let column_names = get_column_names_from_schema(&data, table_name).unwrap_or_default();
+
+                            // Filter rows based on the WHERE clause
+                            let filtered_rows: Vec<_> = initial_data
+                                .iter()
+                                .filter(|row| evaluate_where_clause(condition, row, &column_names))
+                                .collect();
+
+                            // If no rows satisfy the condition, return an appropriate response
+                            if filtered_rows.is_empty() {
+                                return HttpResponse::NotFound()
+                                    .body("No rows matched the specified condition");
+                            }
+
+                            // Perform updates on filtered rows only
+                            for row in &filtered_rows {
+                                if let Some(row_id) = row.get(0) {
+                                    if let Err(e) = update_row(table_name, row_id, updated_values.clone(), &data).await {
+                                        return HttpResponse::InternalServerError()
+                                            .body(format!("Error updating row: {}", e));
+                                    }
                                 }
-
-                                return HttpResponse::Ok().body("Row updated"); // Return Ok response here
                             }
-                            Err(e) => {
+
+                            // Recalculate the table's current view
+                            if let Err(e) = recalculate_current(&data, table_name, initial_data).await {
                                 return HttpResponse::InternalServerError()
-                                    .body(format!("Error loading initial data for recalculation: {}", e));
+                                    .body(format!("Error recalculating data: {}", e));
+                            }else{
+                                return HttpResponse::Ok().body("Rows updated");
                             }
                         }
-                    } else {
-                        return HttpResponse::BadRequest().body("Row ID (UUID) not provided in update statement");
+                        Err(e) => { return HttpResponse::InternalServerError()
+                            .body(format!("Error loading initial data: {}", e))}
                     }
                 } else {
                     HttpResponse::BadRequest().body("Invalid table name in UPDATE statement");
                 }
             }
 
+
+
+
+
             // If there's a WHERE clause without a SELECT or FROM
             ASTNode::Where { .. } => {
-                return HttpResponse::BadRequest().body("WHERE clause without SELECT/FROM");
+
             }
 
             // Handle other AST nodes as needed
@@ -259,6 +297,27 @@ fn extract_column_name(identifier: &Identifier) -> String {
         &parser::Identifier::Star => todo!(), // Or handle literal column names if needed
     }
 }
+fn is_uuid_where_clause(condition: &Expression) -> bool {
+    match condition {
+        Expression::Comparison { left, operator: _, right } => {
+            // Validate that the left side is the "uuid" column
+            let is_left_uuid = matches!(left, Identifier::Name(name) if name == "uuid" || name == "UUID");
+
+            // Validate that the right side is a UUID literal (basic format check)
+            let is_right_a_uuid_literal = matches!(right, Identifier::Literal(lit, _) if {
+                // Attempt to clean up surrounding quotes
+                let cleaned_lit = lit.trim_matches('"');
+                Uuid::parse_str(cleaned_lit).is_ok()
+            });
+            debug!("is_right_a_uuid_literal: {}", is_right_a_uuid_literal);
+            debug!("is_left_uuid: {}", is_left_uuid);
+
+            is_left_uuid && is_right_a_uuid_literal
+        }
+        _ => false, // Unsupported condition type
+    }
+}
+
 
 
 
@@ -280,29 +339,24 @@ async fn process_select(
         Err(_) => return result, // Return empty if column names can't be found
     };
     for row in table_data.iter() {
-        // Filter rows based on WHERE clause (if present)
-        if where_clause.is_none() || evaluate_where_clause(&where_clause.clone().unwrap(), row, &column_names) {
-            let mut selected_row = Vec::new();
-            if columns.len() == 1 && matches!(columns[0], Identifier::Star) {
-                // SELECT * --> add all columns from the row
-                selected_row.extend_from_slice(row);
-            } else {
-                // SELECT specific columns
-                for col in columns {
-                    match col {
-                        Identifier::Name(col_name) => {
-                            if let Some(index) = find_column_index(&column_names, col_name) {
-                                if let Some(value) = row.get(index) {
-                                    selected_row.push(value.to_string());
-                                }
+        let mut selected_row = Vec::new();
+        if columns.len() == 1 && matches!(columns[0], Identifier::Star) {
+            selected_row.extend_from_slice(row);
+        } else {
+            for col in columns {
+                match col {
+                    Identifier::Name(col_name) => {
+                        if let Some(index) = find_column_index(&column_names, col_name) {
+                            if let Some(value) = row.get(index) {
+                                selected_row.push(value.trim_matches('"').to_string());
                             }
                         }
-                        _ => (), // Ignore unsupported identifiers
                     }
+                    _ => (),
                 }
             }
-            result.push(selected_row);
         }
+        result.push(selected_row);
     }
     result
 }
@@ -312,59 +366,78 @@ pub fn evaluate_where_clause(
     row: &[String],
     column_names: &[String],
 ) -> bool {
+    // Normalize column names to uppercase
+    let column_names_upper: Vec<String> = column_names.iter().map(|col| col.to_uppercase()).collect();
+
     match condition {
         Expression::Comparison { left, operator, right } => {
+            // Resolve the left value
             let left_value = match left {
                 Identifier::Name(name) => {
-                    let index_result = find_column_index(column_names, name);
+                    // Normalize the column name in `name` to uppercase and match against `column_names_upper`
+                    let index_result = find_column_index(&column_names_upper, &name.to_uppercase());
                     index_result.and_then(|index| row.get(index).map(|s| s.to_string()))
                 }
-                Identifier::Literal(lit, _) => {
-                    Some(lit.to_string())
-                }
-                _ => {
-                    None
-
-                }, // Unsupported identifier type
+                Identifier::Literal(lit, _) => Some(lit.to_string()),
+                _ => None, // Unsupported identifier type
             };
+
+            // Resolve the right value
             let right_value = match right {
                 Identifier::Name(name) => {
-                    let index_result = find_column_index(column_names, name);
+                    let index_result = find_column_index(&column_names_upper, &name.to_uppercase());
                     index_result.and_then(|index| row.get(index).map(|s| s.to_string()))
                 }
-                Identifier::Literal(lit, _) => {
-                    Some(lit.to_string())
-                }
-                _ => {
-                    None
-                }, // Unsupported identifier type
+                Identifier::Literal(lit, _) => Some(lit.to_string()),
+                _ => None, // Unsupported identifier type
             };
+
+            // Check if either value is None
             if left_value.is_none() || right_value.is_none() {
+                debug!(" None? left_value: {:?}", left_value);
+                debug!("None? right_value: {:?}", right_value);
                 return false; // Unable to evaluate, treat as false
             }
-            let left_val = left_value.unwrap();
-            let right_val = right_value.unwrap();
-            let comparison_result = match operator.as_str() {
+
+            // Extract resolved values
+            let mut left_val = left_value.unwrap();
+            let mut right_val = right_value.unwrap();
+
+            // Trim outer quotes if present (to normalize comparison)
+            left_val = left_val.trim_matches('"').to_string();
+            right_val = right_val.trim_matches('"').to_string();
+
+            debug!("left_val (trimmed): {}", left_val);
+            debug!("right_val (trimmed): {}", right_val);
+
+            // Perform evaluation based on the operator
+            match operator.as_str() {
                 "=" => left_val == right_val,
                 "!=" => left_val != right_val,
                 ">" => left_val > right_val,
                 "<" => left_val < right_val,
                 ">=" => left_val >= right_val,
                 "<=" => left_val <= right_val,
-                _ => {
-                    false
-                },  // Unsupported operator
-            };
-            comparison_result
+                _ => false, // Unsupported operator
+            }
         }
+        _ => false, // Unsupported condition type
     }
 }
 
 
 
 fn find_column_index(column_names: &[String], col_name: &str) -> Option<usize> {
-    column_names.iter().position(|col| col == col_name)
+    let position = column_names
+        .iter()
+        .position(|col| col.eq_ignore_ascii_case(col_name)); // Use case-insensitive comparison
+
+    if position.is_none() {
+        debug!("Column {} not found in {:?}", col_name, column_names);
+    }
+    position
 }
+
 
 #[post("/query")]
 async fn execute_query_endpoint(
@@ -376,7 +449,7 @@ async fn execute_query_endpoint(
     let query_bytes = sql_query.as_bytes();
     let http_request = actix_web::test::TestRequest::default().to_http_request();
 
-    match basic_sql_parser(query_bytes) {
+    match sql_parser(query_bytes) {
         Ok(ast_nodes) => {
             // Successfully parsed query
             execute_query(ast_nodes, data, http_request).await

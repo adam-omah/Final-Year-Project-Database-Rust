@@ -191,12 +191,11 @@ pub fn get_column_names_from_schema(
     table_name: &String,
 ) -> Result<Vec<String>> {
     let schema = state.schema.lock().unwrap();
-    debug!("Available table names in schema: {:?}", schema.tables.keys());
     debug!("Getting column names from schema for table: {}", table_name);
 
     // Try getting the table directly. If not found, try _initial
     let table = match schema.tables.get(table_name) {
-        Some(table) => Some(table),
+        Some(table) => {Some(table)},
         None => {
             let initial_table_name = format!("{}_initial", table_name);
             schema.tables.get(&initial_table_name)
@@ -206,6 +205,7 @@ pub fn get_column_names_from_schema(
     match table {
         Some(table) => {
             let column_names = table.columns.iter().map(|col| col.name.clone()).collect();
+            debug!("Column names for table {}: {:?}", table_name, column_names);
             Ok(column_names)
         },
         None => {

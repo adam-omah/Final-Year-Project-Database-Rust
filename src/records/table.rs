@@ -9,6 +9,8 @@ use std::path::Path;
 use crate::query::parser::Identifier;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
+use tracing::log::debug;
+use crate::schema::schema::get_column_names_from_schema;
 
 pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
     let mut schema = state.schema.lock().unwrap();
@@ -34,17 +36,37 @@ pub fn insert_row(
             .create(true)
             .open(&initial_table_path)?;
 
-        let serialized_row = row_data.join(","); // Convert the row into a CSV-like string
+        let serialized_row = row_data
+            .iter()
+            .map(|value| {
+                if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
+                    value.to_string() // Numeric values stay as is
+                } else {
+                    format!("\"{}\"", value) // String values are wrapped in quotes
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(",");
+
         writeln!(file, "{}", serialized_row)?;
         return Ok(()); // Row inserted into a new `_initial` table
     }
 
     // If `_initial` exists, check whether the row already exists
     let file = OpenOptions::new().read(true).open(&initial_table_path)?;
-    let reader = std::io::BufReader::new(file);
+    let reader = BufReader::new(file);
 
-    // Convert `row_data` into a string to compare against each line in `_initial`
-    let serialized_row = row_data.join(",");
+    let serialized_row = row_data
+        .iter()
+        .map(|value| {
+            if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
+                value.to_string()
+            } else {
+                format!("\"{}\"", value)
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(",");
 
     for line in reader.lines() {
         let existing_row = line?;
@@ -62,7 +84,7 @@ pub fn insert_row(
         .append(true)
         .open(&initial_table_path)?;
 
-    writeln!(file, "{}", serialized_row)?; // Add the new row
+    writeln!(file, "{}", serialized_row)?;
     Ok(())
 }
 
@@ -70,8 +92,8 @@ pub fn insert_row(
 // Append updates to the `_updates` table.
 pub async fn update_row(
     table_name: &str,
-    uuid: &str, // Now takes uuid directly
-    updated_values: HashMap<String, String>,
+    uuid: &str,
+    updated_values: HashMap<String, String>, // Represents column updates { column_name -> updated_value }
     state: &web::Data<AppState>,
 ) -> Result<()> {
     let updates_table_name = format!("{}_updates", table_name);
@@ -79,19 +101,42 @@ pub async fn update_row(
         .join(state.config.table_dir.as_path())
         .join(&updates_table_name);
 
+    let column_names = get_column_names_from_schema(state, &table_name.to_string())
+        .map_err(|_| Error::new(ErrorKind::NotFound, "Schema not found for table"))?;
+
+    let mut serialized_row = Vec::new();
+
+    // Include the UUID as the first column, ensuring it's correctly quoted
+    serialized_row.push(format!("\"{}\"", uuid.trim_matches('"')));
+
+    for column_name in &column_names {
+        if column_name.eq_ignore_ascii_case("UUID") {
+            continue; // Skip UUID column—it’s already included
+        }
+
+        if let Some(updated_value) = updated_values.get(column_name) {
+            if updated_value.parse::<i64>().is_ok() || updated_value.parse::<f64>().is_ok() {
+                serialized_row.push(updated_value.clone()); // Numeric values stay as is
+            } else {
+                serialized_row.push(format!("\"{}\"", updated_value)); // Strings are quoted
+            }
+        } else {
+            serialized_row.push(String::new()); // Empty placeholder for missing values
+        }
+    }
+
+    debug!("Writing to _updates table: {:?}", serialized_row.join(","));
+
     let mut file = OpenOptions::new()
         .append(true)
         .create(true)
         .open(&updates_table_path)?;
 
-    let mut serialized_row = format!("{},", uuid);  // Use provided uuid
-    for value in updated_values.values() {
-        serialized_row.push_str(&format!("{},", value));
-    }
-    writeln!(file, "{}", serialized_row)?;
-
+    writeln!(file, "{}", serialized_row.join(","))?;
     Ok(())
 }
+
+
 
 
 // Utility function for extracting data from `_initial` and `_updates` tables, applying updates, and returning combined data.
@@ -189,6 +234,7 @@ fn merge_table_and_updates(
     updates_data: Vec<Vec<String>>,
 ) -> Vec<Vec<String>> {
     let mut data_by_id = HashMap::new();
+
     // Index the current data by ID
     for row in table_data.iter() {
         if let Some(id) = row.first() {
@@ -201,36 +247,68 @@ fn merge_table_and_updates(
             if let Some(existing_row) = data_by_id.get_mut(id) {
                 for (i, value) in update_row.iter().enumerate().skip(1) {
                     if i < existing_row.len() {
-                        existing_row[i] = value.to_string();
+                        existing_row[i] = if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
+                            value.to_string() // Numeric value stays as is
+                        } else {
+                            format!("\"{}\"", value.trim_matches('"')) // Ensure strings are quoted
+                        };
                     }
                 }
             } else {
-                let mut new_row = Vec::new();
-                for value in update_row.iter() {
-                    new_row.push(value.to_string());
-                }
+                let new_row = update_row
+                    .iter()
+                    .map(|value| {
+                        if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
+                            value.to_string() // Numeric value stays as is
+                        } else {
+                            format!("\"{}\"", value.trim_matches('"')) // Ensure strings are quoted
+                        }
+                    })
+                    .collect::<Vec<String>>();
                 data_by_id.insert(id.clone(), new_row);
             }
         }
     }
+
     data_by_id.into_values().collect()
 }
 
 #[get("/tables/{table_name}")]
 async fn get_table(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
     let table_name = path.into_inner();
-    match get_table_data(data, &table_name).await { // Use data here
-        Ok(table_data) => match serde_json::to_string(&table_data) {
-            Ok(json) => HttpResponse::Ok().body(json),
-            Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
-        },
+    match get_table_data(data, &table_name).await {
+        Ok(table_data) => {
+            // Serialize each value based on its type
+            let formatted_data: Vec<Vec<serde_json::Value>> = table_data
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|value| {
+                            if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
+                                serde_json::Value::Number(
+                                    value
+                                        .parse::<serde_json::Number>()
+                                        .expect("Invalid number format"),
+                                )
+                            } else {
+                                serde_json::Value::String(value.trim_matches('"').to_string())
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+
+            match serde_json::to_string(&formatted_data) {
+                Ok(json) => HttpResponse::Ok().body(json),
+                Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
+            }
+        }
         Err(e) => {
-            if e.kind() == ErrorKind::NotFound {  // Check specifically for Not Found
-                HttpResponse::NotFound().body("Table data file not found") // Or appropriate 404 message
+            if e.kind() == ErrorKind::NotFound {
+                HttpResponse::NotFound().body("Table data file not found")
             } else {
                 HttpResponse::InternalServerError().body(format!("Error retrieving table data: {}", e))
             }
-
         }
     }
 }

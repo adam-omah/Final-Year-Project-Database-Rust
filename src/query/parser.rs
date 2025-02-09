@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::str;
+use tracing::log::debug;
 use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
@@ -65,23 +66,25 @@ fn is_uuid(s: &str) -> bool {
 }
 
 
-pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
+pub fn sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
     let query_str = str::from_utf8(query_bytes).map_err(|e| e.to_string())?;
     // Improved and FINAL Tokenization (No re-tokenizing!)
     let mut tokens = Vec::new();
     let mut in_string = false;
     let mut current_token = String::new();
 
+    debug!("Query: {}", query_str);
+
     for char in query_str.chars() {
         if char == '"' {
-            in_string = !in_string;
-            current_token.push(char);
+            in_string = !in_string; // Toggle string mode
             if !in_string {
+                // When closing a string, store the token (excluding the quotes)
                 tokens.push(current_token.clone());
                 current_token.clear();
             }
         } else if in_string {
-            current_token.push(char);
+            current_token.push(char); // Add only the content inside the quotes
         } else if char == '(' || char == ')' || char == ',' {
             if !current_token.is_empty() {
                 tokens.push(current_token.clone());
@@ -104,6 +107,8 @@ pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
     if tokens.is_empty() {
         return Err("Query is empty".to_string());
     }
+
+    debug!("Tokens: {:?}", tokens);
 
     let mut ast_nodes = Vec::new();
     let mut index = 0;
@@ -276,6 +281,47 @@ pub fn basic_sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
                     return Err("Expected INTO after INSERT".to_string());
                 }
             }
+            "UPDATE" => {
+                index += 1;
+                if index < tokens.len() {
+                    let table = Identifier::Name(tokens[index].clone());
+                    index += 1;
+
+                    if index < tokens.len() && tokens[index] == "SET" {
+                        index += 1;
+                        let mut values = Vec::new();
+                        while index < tokens.len() && tokens[index] != "WHERE" {  // Stop at WHERE
+                            let column = Identifier::Name(tokens[index].clone());
+                            index += 1;
+                            if index < tokens.len() && tokens[index] == "=" {
+                                index += 1;
+                                let value_token = tokens[index].clone();
+                                let value = if is_uuid(&value_token) {
+                                    Identifier::Literal(value_token, Some(DataType::UUID))
+                                } else {
+                                    Identifier::Literal(value_token, None)
+                                };
+
+                                values.push((column, value));
+                                index += 1;
+                                if index < tokens.len() && tokens[index] == "," {
+                                    index += 1;
+                                }
+
+                            } else {
+                                return Err("Expected '=' after column name in UPDATE".to_string());
+                            }
+                        }
+                        ast_nodes.push(ASTNode::Update { table, values });
+                    } else {
+                        return Err("Expected 'SET' after table name in UPDATE".to_string());
+                    }
+                } else {
+                    return Err("Expected table name after UPDATE".to_string());
+                }
+            }
+
+
             _ => return Err(format!("Unexpected token: {}", tokens[index])),
         }
     }
@@ -290,7 +336,7 @@ mod tests {
     #[test]
     fn test_basic_comparison() {
         let query = b"SELECT id FROM my_table WHERE id = 1";
-        let ast = basic_sql_parser(query).unwrap();
+        let ast = sql_parser(query).unwrap();
 
         assert_eq!(
             ast,
@@ -311,7 +357,7 @@ mod tests {
     #[test]
     fn test_select_star() {
         let query = b"SELECT * FROM users";
-        let ast = basic_sql_parser(query).unwrap();
+        let ast = sql_parser(query).unwrap();
 
         assert_eq!(
             ast,
@@ -325,7 +371,7 @@ mod tests {
     #[test]
     fn test_create_table_custom() {
         let query = b"CREATE TABLE test_table (col1 Int, col2 String)";
-        let ast = basic_sql_parser(query).unwrap();
+        let ast = sql_parser(query).unwrap();
 
         assert_eq!(
             ast,
@@ -344,7 +390,7 @@ mod tests {
     #[test]
     fn test_invalid_create_table_missing_paren() {
         let query = b"CREATE TABLE users id INT, name TEXT";
-        let ast = basic_sql_parser(query);
+        let ast = sql_parser(query);
 
         assert!(ast.is_err());
         assert_eq!(ast.err().unwrap(), "Expected '(' after table name".to_string());
@@ -353,7 +399,7 @@ mod tests {
     #[test]
     fn test_invalid_column_definition() {
         let query = b"CREATE TABLE users (id)";
-        let ast = basic_sql_parser(query);
+        let ast = sql_parser(query);
 
         assert!(ast.is_err());
         assert_eq!(ast.err().unwrap(), "Invalid column definition".to_string());
@@ -362,7 +408,7 @@ mod tests {
     #[test]
     fn test_missing_column_type() {
         let query = b"CREATE TABLE users (id, name)";
-        let ast = basic_sql_parser(query);
+        let ast = sql_parser(query);
 
         assert!(ast.is_err());
         assert_eq!(ast.err().unwrap(), "Invalid column definition".to_string());
@@ -371,7 +417,7 @@ mod tests {
     #[test]
     fn test_insert_statement() {
         let query = b"INSERT INTO users (id, name) VALUES (1, \"John Doe\")";
-        let ast = basic_sql_parser(query).unwrap();
+        let ast = sql_parser(query).unwrap();
 
         assert_eq!(
             ast,
@@ -393,7 +439,7 @@ mod tests {
     #[test]
     fn test_insert_without_columns() {
         let query = b"INSERT INTO users VALUES (1, \"test\")";
-        let ast = basic_sql_parser(query).unwrap();
+        let ast = sql_parser(query).unwrap();
         assert_eq!(ast, vec![
             ASTNode::Insert {
                 table: Identifier::Name("users".to_string()),

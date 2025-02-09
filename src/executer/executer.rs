@@ -161,7 +161,7 @@ pub async fn execute_query(
                     row_data.insert(0, uuid); // Insert UUID as the first column (if schema requires it)
 
                     // Validate and handle column names (if provided)
-                    let column_names: Option<Vec<String>> = if columns.is_empty() {
+                    let _column_names: Option<Vec<String>> = if columns.is_empty() {
                         None // No columns provided
                     } else {
                         // Convert columns: Vec<Identifier> to Option<Vec<String>>
@@ -188,6 +188,7 @@ pub async fn execute_query(
                     return HttpResponse::BadRequest().body("Invalid table name in INSERT statement");
                 }
             }
+
             ASTNode::Update { table, values } => {
                 if let Identifier::Name(table_name) = table {
                     let mut updated_values = HashMap::new();
@@ -314,7 +315,6 @@ fn is_uuid_where_clause(condition: &Expression) -> bool {
 
             is_left_uuid && is_right_a_uuid_literal
         }
-        _ => false, // Unsupported condition type
     }
 }
 
@@ -326,7 +326,7 @@ async fn process_select(
     table_data: &[Vec<String>],
     data: web::Data<AppState>,
     table_name: &String,
-    where_clause: Option<Expression>,
+    _where_clause: Option<Expression>,
 ) -> Vec<Vec<String>> {
     let mut result = Vec::new();
     // Check if table_data is empty
@@ -421,7 +421,6 @@ pub fn evaluate_where_clause(
                 _ => false, // Unsupported operator
             }
         }
-        _ => false, // Unsupported condition type
     }
 }
 

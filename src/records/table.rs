@@ -3,14 +3,14 @@
 use crate::schema::{schema::create_table as schema_create_table, schema::Table};
 use crate::AppState;
 use actix_web::{get, web, HttpResponse, Responder};
-use std::fs::{metadata, File, OpenOptions};
+use std::fs::{OpenOptions};
 use std::io::{BufRead, BufReader, Error, ErrorKind, Result, Write};
 use std::path::Path;
 use crate::query::parser::Identifier;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use tracing::log::debug;
-use crate::schema::schema::get_column_names_from_schema;
+use crate::schema::schema::{check_column_rules, is_valid_data_type};
 
 pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
     let mut schema = state.schema.lock().unwrap();
@@ -24,39 +24,45 @@ pub fn insert_row(
     row_data: Vec<String>,
     state: &web::Data<AppState>,
 ) -> Result<()> {
+    // Convert the `row_data` into a HashMap of column names to values
+    let schema = {
+        let schema_guard = state.schema.lock().unwrap();
+        schema_guard.clone()
+    };
+
     let initial_table_name = format!("{}_initial", table_name);
+    let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Table '{}' does not exist in schema", initial_table_name),
+        )
+    })?;
+
+    let mut row_data_map = HashMap::new();
+    for (index, column) in table.columns.iter().enumerate() {
+        row_data_map.insert(column.name.clone(), row_data.get(index).cloned().unwrap_or_default());
+    }
+
+    // Validate and process the row
+    let validated_row = validate_and_process_row(table_name, row_data_map, state)?;
+
     let initial_table_path = Path::new(state.config.db_dir.as_path())
         .join(state.config.table_dir.as_path())
         .join(&initial_table_name);
 
-    // If the `_initial` table does not exist, create and insert the new row
-    if metadata(&initial_table_path).is_err() {
-        let mut file = OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&initial_table_path)?;
-
-        let serialized_row = row_data
-            .iter()
-            .map(|value| {
-                if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
-                    value.to_string() // Numeric values stay as is
-                } else {
-                    format!("\"{}\"", value) // String values are wrapped in quotes
-                }
-            })
-            .collect::<Vec<String>>()
-            .join(",");
-
-        writeln!(file, "{}", serialized_row)?;
-        return Ok(()); // Row inserted into a new `_initial` table
+    // Check if the `_initial` table file exists
+    if !initial_table_path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("The '_initial' table file for '{}' does not exist", table_name),
+        ));
     }
 
-    // If `_initial` exists, check whether the row already exists
+    // Check if the row already exists in the `_initial` table
     let file = OpenOptions::new().read(true).open(&initial_table_path)?;
     let reader = BufReader::new(file);
 
-    let serialized_row = row_data
+    let serialized_row = validated_row
         .iter()
         .map(|value| {
             if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
@@ -79,7 +85,7 @@ pub fn insert_row(
         }
     }
 
-    // If the row does not exist, append it to the `_initial` table
+    // Append the validated row to the `_initial` table
     let mut file = OpenOptions::new()
         .append(true)
         .open(&initial_table_path)?;
@@ -101,38 +107,35 @@ pub async fn update_row(
         .join(state.config.table_dir.as_path())
         .join(&updates_table_name);
 
-    let column_names = get_column_names_from_schema(state, &table_name.to_string())
-        .map_err(|_| Error::new(ErrorKind::NotFound, "Schema not found for table"))?;
+    // Add UUID to the row data
+    let mut row_data = updated_values;
+    row_data.insert("UUID".to_string(), uuid.to_string());
 
-    let mut serialized_row = Vec::new();
+    // Validate and process the row
+    let validated_row = validate_and_process_row(table_name, row_data, state)?;
 
-    // Include the UUID as the first column, ensuring it's correctly quoted
-    serialized_row.push(format!("\"{}\"", uuid.trim_matches('"')));
-
-    for column_name in &column_names {
-        if column_name.eq_ignore_ascii_case("UUID") {
-            continue; // Skip UUID column—it’s already included
-        }
-
-        if let Some(updated_value) = updated_values.get(column_name) {
-            if updated_value.parse::<i64>().is_ok() || updated_value.parse::<f64>().is_ok() {
-                serialized_row.push(updated_value.clone()); // Numeric values stay as is
+    // Serialize the row for writing
+    let serialized_row = validated_row
+        .iter()
+        .map(|value| {
+            if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
+                value.to_string()
             } else {
-                serialized_row.push(format!("\"{}\"", updated_value)); // Strings are quoted
+                format!("\"{}\"", value)
             }
-        } else {
-            serialized_row.push(String::new()); // Empty placeholder for missing values
-        }
-    }
+        })
+        .collect::<Vec<String>>()
+        .join(",");
 
-    debug!("Writing to _updates table: {:?}", serialized_row.join(","));
+    debug!("Writing to _updates table: {:?}", serialized_row);
 
+    // Append the validated row to the `_updates` table
     let mut file = OpenOptions::new()
         .append(true)
         .create(true)
         .open(&updates_table_path)?;
 
-    writeln!(file, "{}", serialized_row.join(","))?;
+    writeln!(file, "{}", serialized_row)?;
     Ok(())
 }
 
@@ -194,6 +197,59 @@ pub fn load_table_data_from_file(table_path: &Path) -> Result<Vec<Vec<String>>> 
             })
         })
         .collect()
+}
+
+fn validate_and_process_row(
+    table_name: &str,
+    row_data: HashMap<String, String>,
+    state: &web::Data<AppState>,
+) -> Result<Vec<String>> {
+    // Lock the schema just long enough to get a clone of it
+    let schema = {
+        let schema_guard = state.schema.lock().unwrap();
+        schema_guard.clone() // Clone the schema to work on a local copy
+    };
+
+    // Validate that the table exists in the cloned schema
+    let initial_table_name = format!("{}_initial", table_name);
+    let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Table '{}' does not exist in schema", initial_table_name),
+        )
+    })?;
+
+    // Validate row data based on the schema's column constraints
+    let mut validated_row = Vec::new();
+
+    for column in &table.columns {
+        // Get the value for the column
+        let value = row_data.get(&column.name).unwrap_or(&String::new()).to_string();
+
+        // Validate the data type
+        if !is_valid_data_type(&column.data_type, &value) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Invalid data type for column '{}'. Expected: {:?}, Found: {}",
+                    column.name, column.data_type, value
+                ),
+            ));
+        }
+
+        // Validate and transform the value based on column rules
+        let validated_value = check_column_rules(column, &value).and_then(|validated| {
+            validated.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Constraint violation for column '{}'", column.name),
+                )
+            })
+        })?;
+        validated_row.push(validated_value);
+    }
+
+    Ok(validated_row)
 }
 
 pub(crate) fn extract_literal_value(identifier: &Identifier) -> String {

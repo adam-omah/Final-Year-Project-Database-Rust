@@ -216,51 +216,22 @@ fn merge_table_and_updates(
     data_by_id.into_values().collect()
 }
 
-// API end point for get tables.
-
 #[get("/tables/{table_name}")]
 async fn get_table(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
     let table_name = path.into_inner();
-    let state = data.into_inner();
-    let mut cache = state.cache.lock().unwrap();
-
-    if let Some(table_data) = cache.get(&table_name) {
-        match serde_json::to_string(&table_data) {
-            Ok(json) => return HttpResponse::Ok().body(json),
-            Err(e) => return HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
-        }
-    }
-
-    // Case for where Table is not found in the cache.
-    let schema = state.schema.lock().unwrap();
-    if let Some(_table) = schema.tables.get(&table_name) {
-        let table_path = state.config.db_dir.join(state.config.table_dir.as_path()).join(&table_name);
-        if let Ok(file) = File::open(table_path) {
-            let reader = BufReader::new(file);
-            let mut table_data = Vec::new();
-
-            for line_result in reader.lines() {
-                if let Ok(line) = line_result {
-                    let row_values: Vec<String> = line
-                        .split(',')
-                        .map(|s| s.trim_matches('"').to_string())
-                        .collect();
-                    table_data.push(row_values)
-                } else {
-                    return HttpResponse::InternalServerError().body("Error reading a line");
-                }
+    match get_table_data(data, &table_name).await { // Use data here
+        Ok(table_data) => match serde_json::to_string(&table_data) {
+            Ok(json) => HttpResponse::Ok().body(json),
+            Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
+        },
+        Err(e) => {
+            if e.kind() == ErrorKind::NotFound {  // Check specifically for Not Found
+                HttpResponse::NotFound().body("Table data file not found") // Or appropriate 404 message
+            } else {
+                HttpResponse::InternalServerError().body(format!("Error retrieving table data: {}", e))
             }
 
-            cache.insert(table_name.clone(), table_data.clone());
-
-            match serde_json::to_string(&table_data) {
-                Ok(json) => HttpResponse::Ok().body(json),
-                Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
-            }
-        } else {
-            HttpResponse::NotFound().body("Table data file not found")
         }
-    } else {
-        HttpResponse::NotFound().body("Table not found in schema")
     }
 }
+

@@ -11,6 +11,8 @@ use futures::future::BoxFuture;
 use std::collections::HashMap;
 use tracing::log::debug;
 use crate::schema::schema::{check_column_rules, is_valid_data_type};
+use chrono::Utc;
+
 
 pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
     let mut schema = state.schema.lock().unwrap();
@@ -24,7 +26,7 @@ pub fn insert_row(
     row_data: Vec<String>,
     state: &web::Data<AppState>,
 ) -> Result<()> {
-    // Convert the `row_data` into a HashMap of column names to values
+    // Acquire schema lock and clone it for validation purposes
     let schema = {
         let schema_guard = state.schema.lock().unwrap();
         schema_guard.clone()
@@ -38,59 +40,36 @@ pub fn insert_row(
         )
     })?;
 
+    // Prepare and validate row data
     let mut row_data_map = HashMap::new();
     for (index, column) in table.columns.iter().enumerate() {
         row_data_map.insert(column.name.clone(), row_data.get(index).cloned().unwrap_or_default());
     }
-
-    // Validate and process the row
     let validated_row = validate_and_process_row(table_name, row_data_map, state)?;
 
+    // Prepare the `_initial` table file path
     let initial_table_path = Path::new(state.config.db_dir.as_path())
         .join(state.config.table_dir.as_path())
         .join(&initial_table_name);
 
-    // Check if the `_initial` table file exists
-    if !initial_table_path.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("The '_initial' table file for '{}' does not exist", table_name),
-        ));
-    }
 
-    // Check if the row already exists in the `_initial` table
-    let file = OpenOptions::new().read(true).open(&initial_table_path)?;
-    let reader = BufReader::new(file);
-
+    // Serialize validated row using `quote_if_needed`
     let serialized_row = validated_row
         .iter()
         .map(|value| {
             if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
-                value.to_string()
+                value.to_string() // Keep numbers as-is
             } else {
-                format!("\"{}\"", value)
+                quote_if_needed(value) // Use helper function for quoting
             }
         })
         .collect::<Vec<String>>()
         .join(",");
 
-    for line in reader.lines() {
-        let existing_row = line?;
-        if existing_row == serialized_row {
-            // Row already exists
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "The row already exists in the initial table.",
-            ));
-        }
-    }
-
-    // Append the validated row to the `_initial` table
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(&initial_table_path)?;
-
-    writeln!(file, "{}", serialized_row)?;
+    // Open the `_initial` table file in append-only mode
+    let mut writer = open_table_file_append_only(&initial_table_path)?;
+    // Write the validated row to the `_initial` table file
+    writeln!(writer, "{}", serialized_row)?;
     Ok(())
 }
 
@@ -99,7 +78,7 @@ pub fn insert_row(
 pub async fn update_row(
     table_name: &str,
     uuid: &str,
-    updated_values: HashMap<String, String>, // Represents column updates { column_name -> updated_value }
+    mut updated_values: HashMap<String, String>,
     state: &web::Data<AppState>,
 ) -> Result<()> {
     let updates_table_name = format!("{}_updates", table_name);
@@ -108,34 +87,28 @@ pub async fn update_row(
         .join(&updates_table_name);
 
     // Add UUID to the row data
-    let mut row_data = updated_values;
-    row_data.insert("UUID".to_string(), uuid.to_string());
+    updated_values.insert("UUID".to_string(), uuid.to_string());
+    // Validate and process the updated row
+    let validated_row = validate_and_process_row(table_name, updated_values, state)?;
 
-    // Validate and process the row
-    let validated_row = validate_and_process_row(table_name, row_data, state)?;
-
-    // Serialize the row for writing
+    // Serialize the row for writing using `quote_if_needed`
     let serialized_row = validated_row
         .iter()
         .map(|value| {
             if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
-                value.to_string()
+                value.to_string() // Keep numbers as-is
             } else {
-                format!("\"{}\"", value)
+                quote_if_needed(value) // Use helper function for quoting
             }
         })
         .collect::<Vec<String>>()
         .join(",");
 
     debug!("Writing to _updates table: {:?}", serialized_row);
-
-    // Append the validated row to the `_updates` table
-    let mut file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&updates_table_path)?;
-
-    writeln!(file, "{}", serialized_row)?;
+    // Open the `_updates` table file in append-only mode
+    let mut writer = open_table_file_append_only(&updates_table_path)?;
+    // Write the serialized row to the `_updates` table file
+    writeln!(writer, "{}", serialized_row)?;
     Ok(())
 }
 
@@ -201,7 +174,7 @@ pub fn load_table_data_from_file(table_path: &Path) -> Result<Vec<Vec<String>>> 
 
 fn validate_and_process_row(
     table_name: &str,
-    row_data: HashMap<String, String>,
+    mut row_data: HashMap<String, String>,
     state: &web::Data<AppState>,
 ) -> Result<Vec<String>> {
     // Lock the schema just long enough to get a clone of it
@@ -223,8 +196,25 @@ fn validate_and_process_row(
     let mut validated_row = Vec::new();
 
     for column in &table.columns {
-        // Get the value for the column
-        let value = row_data.get(&column.name).unwrap_or(&String::new()).to_string();
+        let column_name = &column.name;
+
+        let value = row_data.remove(column_name).unwrap_or_else(|| {
+            if column_name == "timestamp" {
+                // Add current timestamp if "timestamp" is not provided or is empty
+                Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+            } else {
+                String::new() // Default to an empty string for other columns
+            }
+        });
+        // catch for if timestamp is provided but is empty.
+        let value = if column_name == "timestamp" && value.trim().is_empty() {
+            Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+        } else {
+            value
+        };
+
+
+        debug!("Value for column '{}': {}", column_name, value);
 
         // Validate the data type
         if !is_valid_data_type(&column.data_type, &value) {
@@ -232,7 +222,7 @@ fn validate_and_process_row(
                 std::io::ErrorKind::InvalidInput,
                 format!(
                     "Invalid data type for column '{}'. Expected: {:?}, Found: {}",
-                    column.name, column.data_type, value
+                    column_name, column.data_type, value
                 ),
             ));
         }
@@ -242,21 +232,47 @@ fn validate_and_process_row(
             validated.ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("Constraint violation for column '{}'", column.name),
+                    format!("Constraint violation for column '{}'", column_name),
                 )
             })
         })?;
+
         validated_row.push(validated_value);
     }
 
     Ok(validated_row)
 }
 
+fn open_table_file_append_only(table_path: &Path) -> Result<std::fs::File> {
+    OpenOptions::new()
+        .append(true)
+        .open(table_path)
+        .map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!(
+                    "Failed to open table file '{}' in append-only mode: {}",
+                    table_path.display(),
+                    e
+                ),
+            )
+        })
+}
+
+
 pub(crate) fn extract_literal_value(identifier: &Identifier) -> String {
     match identifier {
         Identifier::Literal(value, _) => value.clone(),
         Identifier::Name(name) => name.clone(),
         Identifier::Star => "*".to_string(), // Or handle this differently
+    }
+}
+
+fn quote_if_needed(value: &str) -> String {
+    if value.starts_with('"') && value.ends_with('"') {
+        value.to_string() // The value is already quoted, return as-is
+    } else {
+        format!("\"{}\"", value) // Add quotes if the value is not quoted
     }
 }
 
@@ -279,10 +295,6 @@ pub async fn recalculate_current(
 
     Ok(()) // No file writing is needed now!
 }
-
-
-
-
 
 
 fn merge_table_and_updates(

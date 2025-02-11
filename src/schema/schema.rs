@@ -8,6 +8,8 @@ use actix_web::web;
 use tracing::log::debug;
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
+use chrono::NaiveDateTime;
+
 
 
 // Data types for columns.
@@ -16,6 +18,7 @@ pub enum DataType {
     Int,
     String,
     UUID,
+    DateTime,
 }
 
 impl From<&str> for DataType {
@@ -24,6 +27,7 @@ impl From<&str> for DataType {
             "int" | "integer" => DataType::Int,
             "string" | "text" | "varchar" => DataType::String,
             "uuid" => DataType::UUID,
+            "datetime" => DataType::DateTime,
             _ => panic!("Unsupported data type: {}", s),
         }
     }
@@ -111,9 +115,8 @@ pub fn create_table(schema: &mut Schema, table: Table, config: &DatabaseConfig) 
     initial_table.name = initial_table_name.clone();
 
     // Create the updates table (using the original 'table' by moving ownership)
-    let mut updates_table = table;  // Move ownership to avoid another clone
+    let mut updates_table = table; // Move ownership to avoid another clone
     updates_table.name = updates_table_name.clone();
-
 
     // The UUID column definition (same for both initial and updates tables)
     let uuid_column = Column {
@@ -122,16 +125,38 @@ pub fn create_table(schema: &mut Schema, table: Table, config: &DatabaseConfig) 
         rules: vec![],
     };
 
+    // The timestamp column definition (same for both initial and updates tables)
+    let timestamp_column = Column {
+        name: "timestamp".to_string(),
+        data_type: DataType::DateTime, // Use the DateTime data type
+        rules: vec![], // Add rules if needed
+    };
+
     // Insert the UUID column as the first column in both tables
     initial_table.columns.insert(0, uuid_column.clone());
-    updates_table.columns.insert(0, uuid_column);
+    updates_table.columns.insert(0, uuid_column.clone());
+
+    // Append the timestamp column to the end of both tables
+    initial_table.columns.push(timestamp_column.clone());
+    updates_table.columns.push(timestamp_column.clone());
 
     // Add both tables to the schema
-    schema.tables.insert(initial_table_name, initial_table);
-    schema.tables.insert(updates_table_name, updates_table);
+    schema.tables.insert(initial_table_name.clone(), initial_table);
+    schema.tables.insert(updates_table_name.clone(), updates_table);
 
     // Save the updated schema to disk
     save_schema(schema, config)?;
+
+    // Create the empty `_initial` and `_updates` table files
+    let initial_table_path = config.db_dir.join(&config.table_dir).join(initial_table_name);
+    if !initial_table_path.exists() {
+        std::fs::File::create(initial_table_path)?;
+    }
+
+    let updates_table_path = config.db_dir.join(&config.table_dir).join(updates_table_name);
+    if !updates_table_path.exists() {
+        std::fs::File::create(updates_table_path)?;
+    }
 
     Ok(())
 }
@@ -179,10 +204,11 @@ pub fn is_valid_data_type(data_type: &DataType, value: &str) -> bool {
         DataType::Int => value.parse::<i64>().is_ok(), // Or your desired integer type
         DataType::String => true, // Strings are always valid (for now)
         DataType::UUID => {
-            //Basic attempt to validate UUIDs.  Better UUID validation may be desirable.
-            uuid::Uuid::parse_str(value).is_ok()
-        },
-        // You can add validation for String length, format, etc. here
+            // Strip quotes from the value before validating as a UUID
+            let clean_value = value.trim_matches('"');
+            uuid::Uuid::parse_str(clean_value).is_ok()
+        }
+        DataType::DateTime => NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").is_ok(),
     }
 }
 

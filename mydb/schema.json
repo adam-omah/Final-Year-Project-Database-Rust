@@ -17,45 +17,10 @@
           "name": "name",
           "data_type": "String",
           "rules": []
-        }
-      ]
-    },
-    "test_table_updates": {
-      "name": "test_table_updates",
-      "columns": [
-        {
-          "name": "UUID",
-          "data_type": "UUID",
-          "rules": []
         },
         {
-          "name": "number",
-          "data_type": "Int",
-          "rules": []
-        },
-        {
-          "name": "text",
-          "data_type": "String",
-          "rules": []
-        }
-      ]
-    },
-    "test_table_initial": {
-      "name": "test_table_initial",
-      "columns": [
-        {
-          "name": "UUID",
-          "data_type": "UUID",
-          "rules": []
-        },
-        {
-          "name": "number",
-          "data_type": "Int",
-          "rules": []
-        },
-        {
-          "name": "text",
-          "data_type": "String",
+          "name": "timestamp",
+          "data_type": "DateTime",
           "rules": []
         }
       ]
@@ -76,6 +41,11 @@
         {
           "name": "name",
           "data_type": "String",
+          "rules": []
+        },
+        {
+          "name": "timestamp",
+          "data_type": "DateTime",
           "rules": []
         }
       ]

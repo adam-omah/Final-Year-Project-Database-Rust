@@ -73,8 +73,6 @@ pub fn sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
     let mut in_string = false;
     let mut current_token = String::new();
 
-    debug!("Query: {}", query_str);
-
     for char in query_str.chars() {
         if char == '"' {
             in_string = !in_string; // Toggle string mode
@@ -107,8 +105,6 @@ pub fn sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
     if tokens.is_empty() {
         return Err("Query is empty".to_string());
     }
-
-    debug!("Tokens: {:?}", tokens);
 
     let mut ast_nodes = Vec::new();
     let mut index = 0;

@@ -175,9 +175,8 @@ pub async fn execute_query(
                                 .collect(),
                         )
                     };
-
                     // Call insert_row with updated row_data (including UUID)
-                    match insert_row(table_name.as_str(), row_data, &data) {
+                    match insert_row(table_name.as_str(), row_data, &data).await {
                         Ok(_) => return HttpResponse::Ok().body("Row inserted"),
                         Err(err) => {
                             return HttpResponse::InternalServerError()
@@ -203,7 +202,6 @@ pub async fn execute_query(
                     // Check for WHERE clause
                     let mut where_clause: Option<Expression> = None;
                     if i + 1 < ast_nodes.len() {
-                        debug!("AstNode at index is {:#?}", &ast_nodes[i + 1]);
                         if let ASTNode::Where { condition } = &ast_nodes[i + 1] {
                             where_clause = Some(condition.clone());
                         }
@@ -310,9 +308,6 @@ fn is_uuid_where_clause(condition: &Expression) -> bool {
                 let cleaned_lit = lit.trim_matches('"');
                 Uuid::parse_str(cleaned_lit).is_ok()
             });
-            debug!("is_right_a_uuid_literal: {}", is_right_a_uuid_literal);
-            debug!("is_left_uuid: {}", is_left_uuid);
-
             is_left_uuid && is_right_a_uuid_literal
         }
     }
@@ -394,8 +389,6 @@ pub fn evaluate_where_clause(
 
             // Check if either value is None
             if left_value.is_none() || right_value.is_none() {
-                debug!(" None? left_value: {:?}", left_value);
-                debug!("None? right_value: {:?}", right_value);
                 return false; // Unable to evaluate, treat as false
             }
 
@@ -406,9 +399,6 @@ pub fn evaluate_where_clause(
             // Trim outer quotes if present (to normalize comparison)
             left_val = left_val.trim_matches('"').to_string();
             right_val = right_val.trim_matches('"').to_string();
-
-            debug!("left_val (trimmed): {}", left_val);
-            debug!("right_val (trimmed): {}", right_val);
 
             // Perform evaluation based on the operator
             match operator.as_str() {
@@ -444,7 +434,6 @@ async fn execute_query_endpoint(
     data: web::Data<AppState>,
 ) -> HttpResponse { // Return plain HttpResponse
     let sql_query = query.into_inner();
-    debug!("Received query: {}", sql_query);
     let query_bytes = sql_query.as_bytes();
     let http_request = actix_web::test::TestRequest::default().to_http_request();
 

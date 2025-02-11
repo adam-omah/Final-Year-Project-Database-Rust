@@ -7,7 +7,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use crate::executer::executer::execute_query_endpoint;
 use crate::config::database_config::DatabaseConfig;
-use crate::records::table::get_table;
+use crate::records::table::{get_table_api, get_table_at_timestamp_api};
 use schema::{
     schema::load_schema,
     schema::Schema,
@@ -57,8 +57,9 @@ async fn main() -> Result<()> {
                 config: config.clone(),
                 cache: cache.clone(),
             }))
-            .service(get_table) // Ability to retrieve tables.
-            .service(execute_query_endpoint) // Execute queries.
+            .service(get_table_api)
+            .service(execute_query_endpoint)
+            .service(get_table_at_timestamp_api)
     })
         .bind(("0.0.0.0", 8080))?
         .run()
@@ -145,7 +146,7 @@ async fn test_application() -> Result<()> {
     let app = test::init_service(
         App::new()
             .app_data(app_state.clone())
-            .service(get_table)
+            .service(get_table_api)
     )
         .await;
 

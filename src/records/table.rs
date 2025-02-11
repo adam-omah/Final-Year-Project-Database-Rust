@@ -4,14 +4,14 @@ use crate::schema::{schema::create_table as schema_create_table, schema::Table};
 use crate::AppState;
 use actix_web::{get, web, HttpResponse, Responder};
 use std::fs::{OpenOptions};
-use std::io::{BufRead, BufReader, Error, ErrorKind, Result, Write};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Seek, Write};
 use std::path::Path;
 use crate::query::parser::Identifier;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use tracing::log::debug;
 use crate::schema::schema::{check_column_rules, is_valid_data_type};
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 
 
 pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
@@ -21,7 +21,7 @@ pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
     Ok(())
 }
 
-pub fn insert_row(
+pub async fn insert_row(
     table_name: &str,
     row_data: Vec<String>,
     state: &web::Data<AppState>,
@@ -52,7 +52,6 @@ pub fn insert_row(
         .join(state.config.table_dir.as_path())
         .join(&initial_table_name);
 
-
     // Serialize validated row using `quote_if_needed`
     let serialized_row = validated_row
         .iter()
@@ -66,10 +65,14 @@ pub fn insert_row(
         .collect::<Vec<String>>()
         .join(",");
 
-    // Open the `_initial` table file in append-only mode
+    // Open the `_initial` table file in append-only mode and write the data
     let mut writer = open_table_file_append_only(&initial_table_path)?;
-    // Write the validated row to the `_initial` table file
-    writeln!(writer, "{}", serialized_row)?;
+    write_newline_if_needed(&initial_table_path)?;
+    writeln!(writer, "{}", serialized_row)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("Failed to write initial values  to file: {}", e)))?;
+
+    // Add the validated row directly to the cache
+    add_row_to_cache(table_name, validated_row, state).await?;
     Ok(())
 }
 
@@ -104,11 +107,21 @@ pub async fn update_row(
         .collect::<Vec<String>>()
         .join(",");
 
-    debug!("Writing to _updates table: {:?}", serialized_row);
-    // Open the `_updates` table file in append-only mode
+    // Open the `_updates` table file in append-only mode and write the data
     let mut writer = open_table_file_append_only(&updates_table_path)?;
-    // Write the serialized row to the `_updates` table file
-    writeln!(writer, "{}", serialized_row)?;
+    write_newline_if_needed(&updates_table_path)?;
+    writeln!(writer, "{}", serialized_row)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("Failed to write update to file: {}", e)))?;
+
+    // Recalculate the current state after an update
+    let initial_table_name = format!("{}_initial", table_name);
+    let initial_table_path = Path::new(state.config.db_dir.as_path())
+        .join(state.config.table_dir.as_path())
+        .join(&initial_table_name);
+
+    let initial_data = load_table_data_from_file(&initial_table_path)?;
+    recalculate_current(state, table_name, initial_data).await?;
+
     Ok(())
 }
 
@@ -194,10 +207,8 @@ fn validate_and_process_row(
 
     // Validate row data based on the schema's column constraints
     let mut validated_row = Vec::new();
-
     for column in &table.columns {
         let column_name = &column.name;
-
         let value = row_data.remove(column_name).unwrap_or_else(|| {
             if column_name == "timestamp" {
                 // Add current timestamp if "timestamp" is not provided or is empty
@@ -206,15 +217,13 @@ fn validate_and_process_row(
                 String::new() // Default to an empty string for other columns
             }
         });
+
         // catch for if timestamp is provided but is empty.
         let value = if column_name == "timestamp" && value.trim().is_empty() {
             Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
         } else {
             value
         };
-
-
-        debug!("Value for column '{}': {}", column_name, value);
 
         // Validate the data type
         if !is_valid_data_type(&column.data_type, &value) {
@@ -276,73 +285,181 @@ fn quote_if_needed(value: &str) -> String {
     }
 }
 
+
+
+fn write_newline_if_needed(table_path: &Path) -> Result<()> {
+    // Open the file in read+write mode
+    let mut file = OpenOptions::new().read(true).write(true).open(table_path)?;
+    // Check if the file is empty
+    let metadata = file.metadata()?;
+    if metadata.len() == 0 {
+        // The file is empty, no need to check further
+        return Ok(());
+    }
+    // Seek to the last byte
+    file.seek(std::io::SeekFrom::End(-1))?;
+    let mut last_byte = [0; 1];
+    file.read_exact(&mut last_byte)?;
+
+    // Check if the last byte is a newline (`\n`)
+    if last_byte[0] != b'\n' {
+        // If not, move to the end and append a newline
+        file.seek(std::io::SeekFrom::End(0))?;
+        writeln!(file)?; // Append the newline
+    }
+    Ok(())
+}
+
+
+async fn add_row_to_cache(
+    table_name: &str,
+    new_row: Vec<String>,
+    state: &web::Data<AppState>,
+) -> Result<()> {
+    let mut cache = state.cache.lock().unwrap();
+
+    // Check if the table is already in the cache
+    if let Some(cached_data) = cache.get_mut(table_name) {
+        // Add the new row directly into the cached data
+        cached_data.push(new_row);
+    } else {
+        drop(cache); // Unlock before calling async
+        // If the table is not in the cache, trigger a full recalculation
+        let initial_table_name = format!("{}_initial", table_name);
+        let initial_table_path = Path::new(&state.config.db_dir)
+            .join(&state.config.table_dir)
+            .join(&initial_table_name);
+
+        let initial_data = load_table_data_from_file(&initial_table_path)?;
+        recalculate_current(state, table_name, initial_data).await?;
+    }
+    Ok(())
+}
+
+
+
 pub async fn recalculate_current(
     state: &web::Data<AppState>,
     table_name: &str,
-    initial_data: Vec<Vec<String>>,
+    initial_table_data: Vec<Vec<String>>,
 ) -> Result<()> {
     let updates_table_name = format!("{}_updates", table_name);
     let updates_table_path = Path::new(&state.config.db_dir)
         .join(&state.config.table_dir)
         .join(&updates_table_name);
+
+    // Load updates data
     let updates_data = load_table_data_from_file(&updates_table_path)?;
 
-    let merged_data = merge_table_and_updates(initial_data, updates_data);
+    // Sort updates in descending order of timestamp to ensure the most recent updates are applied
+    let mut sorted_updates_data = updates_data.clone();
+    sorted_updates_data.sort_by(|a, b| {
+        let a_timestamp = a.iter().find(|col| col.contains("-") && col.contains(":"))
+            .and_then(|timestamp| NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S").ok());
+        let b_timestamp = b.iter().find(|col| col.contains("-") && col.contains(":"))
+            .and_then(|timestamp| NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S").ok());
 
-    // Update the cache:  This is now the ONLY place the "current" data is stored.
+        b_timestamp.cmp(&a_timestamp)
+    });
+    // Merge the initial data with sorted updates
+    let merged_data = merge_table_and_update(initial_table_data, sorted_updates_data);
+    // Update the cache
     let mut cache = state.cache.lock().unwrap();
     cache.insert(table_name.to_string(), merged_data);
-
-    Ok(()) // No file writing is needed now!
+    Ok(())
 }
 
-
-fn merge_table_and_updates(
-    table_data: Vec<Vec<String>>,
+fn merge_table_and_update(
+    initial_table_data: Vec<Vec<String>>,
     updates_data: Vec<Vec<String>>,
 ) -> Vec<Vec<String>> {
-    let mut data_by_id = HashMap::new();
+    // Create a lookup map for updates using the unique ID (first column) as the key
+    let mut updates_by_id: HashMap<String, Vec<String>> = HashMap::new();
 
-    // Index the current data by ID
-    for row in table_data.iter() {
-        if let Some(id) = row.first() {
-            data_by_id.insert(id.clone(), row.clone());
+    for update_row in updates_data {
+        if let Some(id) = update_row.first() {
+            updates_by_id.insert(id.clone(), update_row);
         }
     }
 
-    for update_row in updates_data.iter() {
-        if let Some(id) = update_row.first() {
-            if let Some(existing_row) = data_by_id.get_mut(id) {
-                for (i, value) in update_row.iter().enumerate().skip(1) {
-                    if i < existing_row.len() {
-                        existing_row[i] = if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
-                            value.to_string() // Numeric value stays as is
-                        } else {
-                            format!("\"{}\"", value.trim_matches('"')) // Ensure strings are quoted
-                        };
-                    }
+    // Merge updates into the initial table while preserving the order
+    let merged_data = initial_table_data
+        .into_iter()
+        .map(|row| {
+            if let Some(id) = row.first() {
+                if let Some(updated_row) = updates_by_id.get(id) {
+                    // Replace the row with the updated row
+                    return updated_row.clone();
                 }
-            } else {
-                let new_row = update_row
-                    .iter()
-                    .map(|value| {
-                        if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
-                            value.to_string() // Numeric value stays as is
-                        } else {
-                            format!("\"{}\"", value.trim_matches('"')) // Ensure strings are quoted
-                        }
-                    })
-                    .collect::<Vec<String>>();
-                data_by_id.insert(id.clone(), new_row);
+            }
+            // Return the original row if no update is found
+            row
+        })
+        .collect();
+
+    merged_data
+}
+
+pub async fn get_table_at_timestamp(
+    state: web::Data<AppState>,
+    table_name: &String,
+    timestamp: String,
+) -> Result<Vec<Vec<String>>> {
+    let initial_table_name = format!("{}_initial", table_name);
+    let updates_table_name = format!("{}_updates", table_name);
+
+    // Parse the provided timestamp to a NaiveDateTime for comparison.
+    let target_timestamp = NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S").map_err(|_| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("Invalid timestamp format: {}", timestamp),
+        )
+    })?;
+
+    // Load initial data and filter rows by timestamp.
+    let initial_table_path = Path::new(&state.config.db_dir)
+        .join(&state.config.table_dir)
+        .join(&initial_table_name);
+
+    let initial_data = load_table_data_from_file(&initial_table_path)?
+        .into_iter()
+        .filter(|row| row_timestamp_is_before(row, &target_timestamp))
+        .collect::<Vec<_>>();
+
+    // Load updates data and filter rows by timestamp.
+    let updates_table_path = Path::new(&state.config.db_dir)
+        .join(&state.config.table_dir)
+        .join(&updates_table_name);
+    let updates_data = load_table_data_from_file(&updates_table_path)?
+        .into_iter()
+        .filter(|row| row_timestamp_is_before(row, &target_timestamp))
+        .collect::<Vec<_>>();
+
+    // Merge the filtered initial and updates data.
+    let merged_data = merge_table_and_update(initial_data, updates_data);
+
+    Ok(merged_data)
+}
+fn row_timestamp_is_before(row: &Vec<String>, target_timestamp: &NaiveDateTime) -> bool {
+    if let Some(timestamp_str) = row.iter().find(|col| col.contains("-") && col.contains(":")) {
+        let timestamp_str = timestamp_str.trim_matches('"');
+        match NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d %H:%M:%S") {
+            Ok(row_timestamp) => {
+                let is_before = row_timestamp <= *target_timestamp;
+                return is_before;
+            }
+            Err(e) => {
+                debug!("Failed to parse timestamp '{}' as NaiveDateTime. Error: {}",timestamp_str, e);
             }
         }
+    } else {
+        debug!("No valid timestamp column found in row.");
     }
-
-    data_by_id.into_values().collect()
+    false
 }
 
 #[get("/tables/{table_name}")]
-async fn get_table(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
+async fn get_table_api(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
     let table_name = path.into_inner();
     match get_table_data(data, &table_name).await {
         Ok(table_data) => {
@@ -366,6 +483,51 @@ async fn get_table(path: web::Path<String>, data: web::Data<AppState>) -> impl R
                 })
                 .collect();
 
+            match serde_json::to_string(&formatted_data) {
+                Ok(json) => HttpResponse::Ok().body(json),
+                Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
+            }
+        }
+        Err(e) => {
+            if e.kind() == ErrorKind::NotFound {
+                HttpResponse::NotFound().body("Table data file not found")
+            } else {
+                HttpResponse::InternalServerError().body(format!("Error retrieving table data: {}", e))
+            }
+        }
+    }
+}
+
+
+#[get("/tables/{table_name}/at/{timestamp}")]
+async fn get_table_at_timestamp_api(
+    path: web::Path<(String, String)>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let (table_name, timestamp) = path.into_inner(); // Extract table name and timestamp from the path
+    match get_table_at_timestamp(data, &table_name, timestamp).await {
+        Ok(filtered_data) => {
+            // Serialize each value based on its type (number or string)
+            let formatted_data: Vec<Vec<serde_json::Value>> = filtered_data
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|value| {
+                            if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
+                                serde_json::Value::Number(
+                                    value
+                                        .parse::<serde_json::Number>()
+                                        .expect("Invalid number format"),
+                                )
+                            } else {
+                                serde_json::Value::String(value.trim_matches('"').to_string())
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+
+            // Convert the formatted table data to JSON and send it in the response
             match serde_json::to_string(&formatted_data) {
                 Ok(json) => HttpResponse::Ok().body(json),
                 Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),

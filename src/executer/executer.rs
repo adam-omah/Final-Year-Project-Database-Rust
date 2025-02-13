@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use crate::query::parser::{sql_parser, ASTNode, Expression, Identifier};
-use crate::records::table::{create_table, get_table_data, insert_row, load_table_data_from_file, recalculate_current, update_row};
+use crate::records::table::{create_table, get_table_at_timestamp, get_table_data, insert_row, load_table_data_from_file, recalculate_current, update_row};
 use crate::schema::schema;
 use crate::schema::schema::{get_column_names_from_schema};
 use crate::{AppState};
@@ -26,83 +26,80 @@ pub async fn execute_query(
 
     for i in 0..ast_nodes.len() {
         match &ast_nodes[i] {
-            ASTNode::Select { columns } => {
-                if i + 1 < ast_nodes.len() {
-                    if let ASTNode::From { table } = &ast_nodes[i + 1] {
-                        if let Identifier::Name(table_name) = table {
-                            // Load initial data for recalculate_current
-                            let initial_table_name = format!("{}_initial", table_name);
-                            let initial_table_path = Path::new(&data.config.db_dir)
-                                .join(&data.config.table_dir)
-                                .join(&initial_table_name);
-                            let initial_data_result = load_table_data_from_file(&initial_table_path);
+            ASTNode::Select { columns, table, timestamp } => {
+                if let Identifier::Name(table_name) = table {
+                    // Check if a timestamp is provided
+                    if let Some(timestamp) = timestamp {
+                        // Fetch data at the given timestamp
+                        match get_table_at_timestamp(data.clone(), table_name, timestamp.clone()).await {
+                            Ok(table_data) => {
+                                let result = process_select(
+                                    columns,
+                                    &table_data,
+                                    data.clone(),
+                                    table_name,
+                                    where_clause.clone(),
+                                )
+                                    .await;
 
-                            match initial_data_result {
-                                Ok(initial_data) => {
-                                    // Recalculate current data (if necessary)
-                                    if let Err(e) =
-                                        recalculate_current(&data, table_name, initial_data.clone()).await
-                                    {
-                                        eprintln!("Error in recalculate_current: {}", e);
-                                        // Consider returning an error response here if recalculation is critical
-                                    }
-
-                                    let table_data_result = get_table_data(data.clone(), table_name).await;
-
-                                    match table_data_result {
-                                        Ok(table_data) => {
-                                            // Check for a WHERE clause
-                                            if i + 2 < ast_nodes.len() {
-                                                if let ASTNode::Where { condition } = &ast_nodes[i + 2] {
-                                                    where_clause = Some(condition.clone());
-                                                }
-                                            }
-
-                                            let result = process_select(
-                                                columns,
-                                                &table_data,
-                                                data.clone(),
-                                                table_name,
-                                                where_clause.clone(),
-                                            )
-                                                .await;
-
-                                            if result.is_empty() {
-                                                return HttpResponse::Ok().body("No rows found");
-                                            }
-
-                                            match serde_json::to_string(&result) {
-                                                Ok(json) => return HttpResponse::Ok().body(json),
-                                                Err(e) => {
-                                                    return HttpResponse::InternalServerError()
-                                                        .body(format!("Serialization error: {}", e))
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            if e.kind() == std::io::ErrorKind::NotFound {
-                                                return HttpResponse::NotFound().body(e.to_string());
-                                            } else {
-                                                return HttpResponse::InternalServerError().body(e.to_string());
-                                            }
-                                        }
-                                    }
+                                if result.is_empty() {
+                                    return HttpResponse::Ok().body("No rows found");
                                 }
-                                Err(e) => {
-                                    eprintln!("Failed to load initial data: {}", e);
-                                    return HttpResponse::InternalServerError()
-                                        .body(format!("Failed to load initial data: {}", e));
+
+                                match serde_json::to_string(&result) {
+                                    Ok(json) => return HttpResponse::Ok().body(json),
+                                    Err(e) => {
+                                        return HttpResponse::InternalServerError()
+                                            .body(format!("Serialization error: {}", e))
+                                    }
                                 }
                             }
-                        } else {
-                            return HttpResponse::BadRequest()
-                                .body("Invalid table name in FROM clause");
+                            Err(e) => {
+                                if e.kind() == std::io::ErrorKind::NotFound {
+                                    return HttpResponse::NotFound().body("Table data not found");
+                                } else {
+                                    return HttpResponse::InternalServerError()
+                                        .body(format!("Error retrieving table data: {}", e));
+                                }
+                            }
                         }
                     } else {
-                        return HttpResponse::BadRequest().body("FROM clause missing after SELECT");
+                        // Normal `SELECT * FROM table_name` without timestamp
+                        match get_table_data(data.clone(), table_name).await {
+                            Ok(table_data) => {
+                                let result = process_select(
+                                    columns,
+                                    &table_data,
+                                    data.clone(),
+                                    table_name,
+                                    where_clause.clone(),
+                                )
+                                    .await;
+
+                                if result.is_empty() {
+                                    return HttpResponse::Ok().body("No rows found");
+                                }
+
+                                match serde_json::to_string(&result) {
+                                    Ok(json) => return HttpResponse::Ok().body(json),
+                                    Err(e) => return HttpResponse::InternalServerError().body(format!(
+                                        "Serialization error: {}",
+                                        e
+                                    )),
+                                }
+                            }
+                            Err(e) => {
+                                if e.kind() == std::io::ErrorKind::NotFound {
+                                    return HttpResponse::NotFound().body("Table not found");
+                                } else {
+                                    return HttpResponse::InternalServerError()
+                                        .body(format!("Error retrieving table data: {}", e));
+                                }
+                            }
+                        }
                     }
                 } else {
-                    return HttpResponse::BadRequest().body("FROM clause missing after SELECT");
+                    return HttpResponse::BadRequest().body("Invalid table name");
                 }
             }
 
@@ -322,37 +319,60 @@ async fn process_select(
     data: web::Data<AppState>,
     table_name: &String,
     _where_clause: Option<Expression>,
-) -> Vec<Vec<String>> {
+) -> Vec<Vec<serde_json::Value>> {
     let mut result = Vec::new();
-    // Check if table_data is empty
+
     if table_data.is_empty() {
-        return result; // Return an empty result
+        return result; // No data to process
     }
+
     // Get column names for the table
     let column_names = match get_column_names_from_schema(&data, table_name) {
         Ok(names) => names,
         Err(_) => return result, // Return empty if column names can't be found
     };
+
     for row in table_data.iter() {
         let mut selected_row = Vec::new();
+
         if columns.len() == 1 && matches!(columns[0], Identifier::Star) {
-            selected_row.extend_from_slice(row);
+            // Select all columns
+            for value in row.iter() {
+                if let Ok(int_val) = value.parse::<i64>() {
+                    selected_row.push(serde_json::Value::Number(int_val.into()));
+                } else if let Ok(float_val) = value.parse::<f64>() {
+                    selected_row.push(serde_json::Value::Number(
+                        serde_json::Number::from_f64(float_val).unwrap(),
+                    ));
+                } else {
+                    selected_row.push(serde_json::Value::String(value.trim_matches('"').to_string()));
+                }
+            }
         } else {
             for col in columns {
-                match col {
-                    Identifier::Name(col_name) => {
-                        if let Some(index) = find_column_index(&column_names, col_name) {
-                            if let Some(value) = row.get(index) {
-                                selected_row.push(value.trim_matches('"').to_string());
+                if let Identifier::Name(col_name) = col {
+                    if let Some(index) = find_column_index(&column_names, col_name) {
+                        if let Some(value) = row.get(index) {
+                            if let Ok(int_val) = value.parse::<i64>() {
+                                selected_row.push(serde_json::Value::Number(int_val.into()));
+                            } else if let Ok(float_val) = value.parse::<f64>() {
+                                selected_row.push(serde_json::Value::Number(
+                                    serde_json::Number::from_f64(float_val).unwrap(),
+                                ));
+                            } else {
+                                selected_row.push(serde_json::Value::String(
+                                    value.trim_matches('"').to_string(),
+                                ));
                             }
                         }
                     }
-                    _ => (),
                 }
             }
         }
+
         result.push(selected_row);
     }
+
     result
 }
 

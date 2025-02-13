@@ -55,15 +55,10 @@ pub async fn insert_row(
     // Serialize validated row using `quote_if_needed`
     let serialized_row = validated_row
         .iter()
-        .map(|value| {
-            if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
-                value.to_string() // Keep numbers as-is
-            } else {
-                quote_if_needed(value) // Use helper function for quoting
-            }
-        })
+        .map(|value| quote_if_needed(value)) // Apply `quote_if_needed` before writing to storage
         .collect::<Vec<String>>()
         .join(",");
+
 
     // Open the `_initial` table file in append-only mode and write the data
     let mut writer = open_table_file_append_only(&initial_table_path)?;
@@ -279,9 +274,9 @@ pub(crate) fn extract_literal_value(identifier: &Identifier) -> String {
 
 fn quote_if_needed(value: &str) -> String {
     if value.starts_with('"') && value.ends_with('"') {
-        value.to_string() // The value is already quoted, return as-is
+        value[1..value.len() - 1].to_string() // Remove existing quotes for consistent storage
     } else {
-        format!("\"{}\"", value) // Add quotes if the value is not quoted
+        value.to_string() // Store as-is if there are no quotes
     }
 }
 
@@ -408,73 +403,95 @@ pub async fn get_table_at_timestamp(
     let initial_table_name = format!("{}_initial", table_name);
     let updates_table_name = format!("{}_updates", table_name);
 
-    // Parse the provided timestamp to a NaiveDateTime for comparison.
-    let target_timestamp = NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S").map_err(|_| {
-        std::io::Error::new(
+    debug!("timestamp: {}", timestamp);
+
+    // Parse the provided timestamp to a `NaiveDateTime`.
+    let target_timestamp = NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S")
+        .map_err(|_| std::io::Error::new(
             ErrorKind::InvalidInput,
             format!("Invalid timestamp format: {}", timestamp),
-        )
-    })?;
+        ))?;
 
-    // Load initial data and filter rows by timestamp.
+    // Load initial data and filter rows by the timestamp
     let initial_table_path = Path::new(&state.config.db_dir)
         .join(&state.config.table_dir)
         .join(&initial_table_name);
 
-    let initial_data = load_table_data_from_file(&initial_table_path)?
-        .into_iter()
-        .filter(|row| row_timestamp_is_before(row, &target_timestamp))
-        .collect::<Vec<_>>();
+    let initial_data_result = load_table_data_from_file(&initial_table_path);
+    let initial_data = match initial_data_result {
+        Ok(data) => {
+            data.into_iter()
+                .filter(|row| row_timestamp_is_before(row, &target_timestamp))
+                .collect::<Vec<_>>()
+        }
+        Err(e) => {
+            if e.kind() == ErrorKind::NotFound {
+                Vec::new() // Treat missing initial table as empty
+            } else {
+                return Err(e); // Propagate other errors
+            }
+        }
+    };
 
-    // Load updates data and filter rows by timestamp.
+    // Load updates data and filter rows by the timestamp
     let updates_table_path = Path::new(&state.config.db_dir)
         .join(&state.config.table_dir)
         .join(&updates_table_name);
-    let updates_data = load_table_data_from_file(&updates_table_path)?
-        .into_iter()
-        .filter(|row| row_timestamp_is_before(row, &target_timestamp))
-        .collect::<Vec<_>>();
 
-    // Merge the filtered initial and updates data.
+    let updates_data_result = load_table_data_from_file(&updates_table_path);
+    let updates_data = match updates_data_result {
+        Ok(data) => {
+            data.into_iter()
+                .filter(|row| row_timestamp_is_before(row, &target_timestamp))
+                .collect::<Vec<_>>()
+        }
+        Err(e) => {
+            if e.kind() == ErrorKind::NotFound {
+                Vec::new() // Treat missing updates table as empty
+            } else {
+                return Err(e); // Propagate other errors
+            }
+        }
+    };
+
+    // Merge the filtered initial and updates data
     let merged_data = merge_table_and_update(initial_data, updates_data);
 
     Ok(merged_data)
 }
+
 fn row_timestamp_is_before(row: &Vec<String>, target_timestamp: &NaiveDateTime) -> bool {
     if let Some(timestamp_str) = row.iter().find(|col| col.contains("-") && col.contains(":")) {
-        let timestamp_str = timestamp_str.trim_matches('"');
+        let timestamp_str = timestamp_str.trim_matches('"'); // Strip quotes if present
         match NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d %H:%M:%S") {
-            Ok(row_timestamp) => {
-                let is_before = row_timestamp <= *target_timestamp;
-                return is_before;
-            }
+            Ok(row_timestamp) => row_timestamp <= *target_timestamp, // Compare timestamps
             Err(e) => {
-                debug!("Failed to parse timestamp '{}' as NaiveDateTime. Error: {}",timestamp_str, e);
+                debug!(
+                    "Failed to parse timestamp '{}' in row. Error: {}",
+                    timestamp_str, e
+                );
+                false // If timestamp parsing fails, exclude the row
             }
         }
     } else {
-        debug!("No valid timestamp column found in row.");
+        false // Exclude rows without a valid timestamp
     }
-    false
 }
 
 #[get("/tables/{table_name}")]
 async fn get_table_api(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
     let table_name = path.into_inner();
-    match get_table_data(data, &table_name).await {
+
+    match get_table_data(data.clone(), &table_name).await {
         Ok(table_data) => {
-            // Serialize each value based on its type
+            // Format table data for JSON
             let formatted_data: Vec<Vec<serde_json::Value>> = table_data
                 .iter()
                 .map(|row| {
                     row.iter()
                         .map(|value| {
-                            if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
-                                serde_json::Value::Number(
-                                    value
-                                        .parse::<serde_json::Number>()
-                                        .expect("Invalid number format"),
-                                )
+                            if let Ok(num) = value.parse::<serde_json::Number>() {
+                                serde_json::Value::Number(num)
                             } else {
                                 serde_json::Value::String(value.trim_matches('"').to_string())
                             }
@@ -489,7 +506,7 @@ async fn get_table_api(path: web::Path<String>, data: web::Data<AppState>) -> im
             }
         }
         Err(e) => {
-            if e.kind() == ErrorKind::NotFound {
+            if e.kind() == std::io::ErrorKind::NotFound {
                 HttpResponse::NotFound().body("Table data file not found")
             } else {
                 HttpResponse::InternalServerError().body(format!("Error retrieving table data: {}", e))

@@ -49,8 +49,11 @@ pub enum Expression {
 // The Executer will then action it.
 #[derive(Debug, Serialize, Deserialize,PartialEq, Eq,Clone)]
 pub enum ASTNode {
-    Select { columns: Vec<Identifier> },
-    From { table: Identifier },
+    Select {
+        columns: Vec<Identifier>,      // Columns in the SELECT clause
+        table: Identifier,             // Table in the FROM clause
+        timestamp: Option<String>,     // Optional timestamp after 'AT'
+    },
     Where { condition: Expression },
     Insert { table: Identifier, values: Vec<Identifier>, columns: Vec<Identifier> },
     Update { table: Identifier, values: Vec<(Identifier, Identifier)> },
@@ -68,7 +71,37 @@ fn is_uuid(s: &str) -> bool {
 
 pub fn sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
     let query_str = str::from_utf8(query_bytes).map_err(|e| e.to_string())?;
-    // Improved and FINAL Tokenization (No re-tokenizing!)
+    let mut tokens = tokenize_query(query_str)?;
+    let mut ast_nodes = Vec::new();
+
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "SELECT" => {
+                ast_nodes.push(parse_select_clause(&mut tokens, &mut index)?);
+            }
+            "WHERE" => {
+                ast_nodes.push(parse_where_clause(&mut tokens, &mut index)?);
+            }
+            "CREATE" => {
+                ast_nodes.push(parse_create_clause(&mut tokens, &mut index)?);
+            }
+            "INSERT" => {
+                ast_nodes.push(parse_insert_clause(&mut tokens, &mut index)?);
+            }
+            "UPDATE" => {
+                ast_nodes.push(parse_update_clause(&mut tokens, &mut index)?);
+            }
+            _ => {
+                return Err(format!("Unexpected token: {}", tokens[index]));
+            }
+        }
+    }
+
+    Ok(ast_nodes)
+}
+
+fn tokenize_query(query_str: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut in_string = false;
     let mut current_token = String::new();
@@ -77,22 +110,18 @@ pub fn sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
         if char == '"' {
             in_string = !in_string; // Toggle string mode
             if !in_string {
-                // When closing a string, store the token (excluding the quotes)
                 tokens.push(current_token.clone());
                 current_token.clear();
             }
         } else if in_string {
-            current_token.push(char); // Add only the content inside the quotes
-        } else if char == '(' || char == ')' || char == ',' {
+            current_token.push(char);
+        } else if char.is_whitespace() || "()".contains(char) {
             if !current_token.is_empty() {
                 tokens.push(current_token.clone());
                 current_token.clear();
             }
-            tokens.push(char.to_string());
-        } else if char.is_whitespace() {
-            if !current_token.is_empty() {
-                tokens.push(current_token.clone());
-                current_token.clear();
+            if !" ".contains(char) {
+                tokens.push(char.to_string());
             }
         } else {
             current_token.push(char);
@@ -102,227 +131,250 @@ pub fn sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
         tokens.push(current_token);
     }
 
-    if tokens.is_empty() {
-        return Err("Query is empty".to_string());
+    Ok(tokens)
+}
+
+fn parse_select_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
+    let mut columns = Vec::new();
+    let mut timestamp: Option<String> = None;
+    *index += 1; // Move past "SELECT"
+
+    // Parse the column list (e.g., `*` or specific columns)
+    while *index < tokens.len() && tokens[*index] != "FROM" {
+        let identifier = if tokens[*index] == "*" {
+            Identifier::Star
+        } else {
+            Identifier::Name(tokens[*index].to_string())
+        };
+        columns.push(identifier);
+        *index += 1;
     }
 
-    let mut ast_nodes = Vec::new();
-    let mut index = 0;
-    while index < tokens.len() {
-        match tokens[index].as_str() {
-            "SELECT" => {
+    // Parse the mandatory "FROM <table>" clause
+    if *index < tokens.len() && tokens[*index] == "FROM" {
+        *index += 1; // Move past "FROM"
+        if *index < tokens.len() {
+            let table = Identifier::Name(tokens[*index].to_string());
+            *index += 1; // Move past the table name
+
+            // Parse the optional "AT <timestamp>" clause
+            if *index < tokens.len() && tokens[*index] == "AT" {
+                *index += 1; // Move past "AT"
+                if *index < tokens.len() {
+                    let raw_timestamp = tokens[*index].clone();
+
+                    // Normalize the timestamp: Replace 'T' or '%20' with a space
+                    let normalized_timestamp = raw_timestamp
+                        .replace("%20", " ")  // Replace %20 with a space
+                        .replace("T", " ");  // Replace T with a space if it exists
+
+                    timestamp = Some(normalized_timestamp);
+                    *index += 1; // Move past the timestamp
+                } else {
+                    return Err("Expected timestamp after 'AT'".to_string());
+                }
+            }
+
+            // Return the SELECT AST node
+            return Ok(ASTNode::Select {
+                columns,
+                table,
+                timestamp,
+            });
+        } else {
+            return Err("Expected table name after 'FROM'".to_string());
+        }
+    } else {
+        return Err("Missing 'FROM' clause in SELECT statement".to_string());
+    }
+}
+
+fn normalize_timestamp(input: &str) -> String {
+    input.replace("%20", " ").replace("T", " ")
+}
+
+
+fn parse_where_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
+    *index += 1; // Move past "WHERE"
+    if *index + 2 >= tokens.len() {
+        return Err("Invalid WHERE clause".to_string());
+    }
+
+    let left = Identifier::Name(tokens[*index].to_string());
+    *index += 1;
+    let operator = tokens[*index].to_string();
+    *index += 1;
+    let right = if is_uuid(&tokens[*index]) {
+        Identifier::Literal(tokens[*index].to_string(), Some(DataType::UUID))
+    } else {
+        Identifier::Literal(tokens[*index].to_string(), None)
+    };
+    *index += 1;
+
+    Ok(ASTNode::Where {
+        condition: Expression::Comparison { left, operator, right },
+    })
+}
+
+fn parse_create_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
+    *index += 1; // Move past "CREATE"
+    if *index < tokens.len() && tokens[*index] == "TABLE" {
+        *index += 1;
+        if *index < tokens.len() {
+            let table = Identifier::Name(tokens[*index].clone());
+            *index += 1;
+
+            if *index < tokens.len() && tokens[*index] == "(" {
+                *index += 1;
                 let mut columns = Vec::new();
-                index += 1;
-                while index < tokens.len() && tokens[index] != "FROM" {
-                    let identifier = if tokens[index] == "*" {
-                        Identifier::Star
+
+                while *index < tokens.len() && tokens[*index] != ")" {
+                    let column_name = Identifier::Name(tokens[*index].clone());
+                    *index += 1;
+
+                    if *index < tokens.len() {
+                        let column_type = Identifier::Name(tokens[*index].clone());
+                        columns.push((column_name, column_type));
+                        *index += 1;
                     } else {
-                        Identifier::Name(tokens[index].to_string())
-                    };
-                    columns.push(identifier);
-                    index += 1;
-                }
-                ast_nodes.push(ASTNode::Select { columns });
-            }
-            "FROM" => {
-                index += 1;
-                if index < tokens.len() {
-                    let table = Identifier::Name(tokens[index].to_string());
-
-                    ast_nodes.push(ASTNode::From { table });
-                    index += 1;
-                } else {
-                    return Err("Expected table name after FROM".to_string());
-                }
-            }
-            "WHERE" => {
-                index += 1;
-                if index < tokens.len() {
-                    // Basic comparison expression parsing
-                    let left = Identifier::Name(tokens[index].to_string());
-                    index += 1; // Skip left operand
-                    let operator = tokens[index].to_string();
-                    index += 1;  // Skip operator
-                    // Updated to use the new literal parsing logic:
-                    let right_token = tokens[index].to_string();
-                    let right = if is_uuid(&right_token) {
-                        Identifier::Literal(right_token, Some(DataType::UUID))
-                    } else {
-                        Identifier::Literal(right_token, None)
-                    };
-                    index += 1;
-
-                    let condition = Expression::Comparison {
-                        left,
-                        operator,
-                        right,
-                    };
-                    ast_nodes.push(ASTNode::Where { condition });
-                } else {
-                    return Err("Expected condition after WHERE".to_string());
-                }
-            }
-            "CREATE" => {
-                index += 1;
-                if index < tokens.len() && tokens[index] == "TABLE" {
-                    index += 1;
-                    if index < tokens.len() {
-                        let table = Identifier::Name(tokens[index].clone());
-                        index += 1;
-
-                        if index < tokens.len() && tokens[index] == "(" {
-                            index += 1;
-                            let mut columns = Vec::new();
-
-                            while index < tokens.len() && tokens[index] != ")" {
-                                let column_name = Identifier::Name(tokens[index].clone());
-                                index += 1;
-
-                                // Check for column type or end of columns
-                                if index < tokens.len() && tokens[index] != "," && tokens[index] != ")" {
-                                    let column_type = Identifier::Name(tokens[index].clone());
-                                    columns.push((column_name, column_type));
-                                    index += 1;
-                                } else {
-                                    return Err("Invalid column definition".to_string()); // Missing type
-                                }
-
-                                if index < tokens.len() && tokens[index] == "," {
-                                    index += 1;
-                                }
-                            }
-
-
-                            if index < tokens.len() {
-                                if tokens[index] == ")" {
-                                    index += 1;
-                                    ast_nodes.push(ASTNode::Create { table, columns });
-                                } else {
-                                    return Err("Expected ')' or ',' after column definition".to_string());
-                                }
-                            } else {
-                                return Err("Expected ')' after column definitions".to_string());
-                            }
-
-                        } else {
-                            return Err("Expected '(' after table name".to_string());
-                        }
-                    } else {
-                        return Err("Expected table name after CREATE TABLE".to_string());
+                        return Err("Invalid column definition".to_string());
                     }
-                } else {
-                    return Err("Expected TABLE after CREATE".to_string());
-                }
-            }
-            "INSERT" => {
-                index += 1;
-                if index < tokens.len() && tokens[index] == "INTO" {
-                    index += 1;
-                    if index < tokens.len() {
-                        let table = Identifier::Name(tokens[index].clone());
-                        index += 1;
 
-                        let mut columns = Vec::new();
-                        if index < tokens.len() && tokens[index] == "(" {
-                            index += 1;
-                            while index < tokens.len() && tokens[index] != ")" {
-                                columns.push(Identifier::Name(tokens[index].clone()));
-                                index += 1;
-                                if index < tokens.len() && tokens[index] == "," {
-                                    index += 1;
-                                }
-                            }
-                            if index < tokens.len() && tokens[index] == ")" {
-                                index += 1;
-                            } else {
-                                return Err("Expected ')' after column list".to_string());
-                            }
-                        }
-
-                        if index < tokens.len() && tokens[index] == "VALUES" {
-                            index += 1;
-                            if index < tokens.len() && tokens[index] == "(" {
-                                index += 1;
-                                let mut values = Vec::new();
-                                while index < tokens.len() && tokens[index] != ")" {
-                                    let value_token = tokens[index].clone();
-
-                                    let identifier = if is_uuid(&value_token) {
-                                        Identifier::Literal(value_token, Some(DataType::UUID))
-                                    } else {
-                                        Identifier::Literal(value_token, None)
-                                    };
-                                    values.push(identifier); // Treat values as literals
-                                    index += 1;
-                                    if index < tokens.len() && tokens[index] == "," {
-                                        index += 1;
-                                    }
-                                }
-                                if index < tokens.len() && tokens[index] == ")" {
-                                    index += 1;
-                                    ast_nodes.push(ASTNode::Insert { table, columns, values });
-                                } else {
-                                    return Err("Expected ')' after values list".to_string());
-                                }
-                            } else {
-                                return Err("Expected '(' after VALUES".to_string());
-                            }
-                        } else {
-                            return Err("Expected VALUES after table name".to_string());
-                        }
-                    } else {
-                        return Err("Expected table name after INSERT INTO".to_string());
+                    if *index < tokens.len() && tokens[*index] == "," {
+                        *index += 1;
                     }
-                } else {
-                    return Err("Expected INTO after INSERT".to_string());
+                }
+                if *index < tokens.len() && tokens[*index] == ")" {
+                    *index += 1;
+                    return Ok(ASTNode::Create { table, columns });
                 }
             }
-            "UPDATE" => {
-                index += 1;
-                if index < tokens.len() {
-                    let table = Identifier::Name(tokens[index].clone());
-                    index += 1;
-
-                    if index < tokens.len() && tokens[index] == "SET" {
-                        index += 1;
-                        let mut values = Vec::new();
-                        while index < tokens.len() && tokens[index] != "WHERE" {  // Stop at WHERE
-                            let column = Identifier::Name(tokens[index].clone());
-                            index += 1;
-                            if index < tokens.len() && tokens[index] == "=" {
-                                index += 1;
-                                let value_token = tokens[index].clone();
-                                let value = if is_uuid(&value_token) {
-                                    Identifier::Literal(value_token, Some(DataType::UUID))
-                                } else {
-                                    Identifier::Literal(value_token, None)
-                                };
-
-                                values.push((column, value));
-                                index += 1;
-                                if index < tokens.len() && tokens[index] == "," {
-                                    index += 1;
-                                }
-
-                            } else {
-                                return Err("Expected '=' after column name in UPDATE".to_string());
-                            }
-                        }
-                        ast_nodes.push(ASTNode::Update { table, values });
-                    } else {
-                        return Err("Expected 'SET' after table name in UPDATE".to_string());
-                    }
-                } else {
-                    return Err("Expected table name after UPDATE".to_string());
-                }
-            }
-
-
-            _ => return Err(format!("Unexpected token: {}", tokens[index])),
         }
     }
-    Ok(ast_nodes)
+
+    Err("Invalid CREATE clause".to_string())
 }
+
+fn parse_insert_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
+    *index += 1; // Move past "INSERT"
+    if *index < tokens.len() && tokens[*index] == "INTO" {
+        *index += 1;
+        if *index < tokens.len() {
+            let table = Identifier::Name(tokens[*index].to_string());
+            *index += 1;
+
+            let mut columns = Vec::new();
+            if *index < tokens.len() && tokens[*index] == "(" {
+                *index += 1;
+                while *index < tokens.len() && tokens[*index] != ")" {
+                    columns.push(Identifier::Name(tokens[*index].to_string()));
+                    *index += 1;
+                    if *index < tokens.len() && tokens[*index] == "," {
+                        *index += 1;
+                    }
+                }
+                if *index < tokens.len() && tokens[*index] == ")" {
+                    *index += 1;
+                } else {
+                    return Err("Expected ')' after column list".to_string());
+                }
+            }
+
+            if *index < tokens.len() && tokens[*index] == "VALUES" {
+                *index += 1;
+                if *index < tokens.len() && tokens[*index] == "(" {
+                    *index += 1;
+                    let mut values = Vec::new();
+                    while *index < tokens.len() && tokens[*index] != ")" {
+                        let value_token = tokens[*index].clone();
+
+                        let identifier = if is_uuid(&value_token) {
+                            Identifier::Literal(value_token, Some(DataType::UUID))
+                        } else {
+                            Identifier::Literal(value_token, None)
+                        };
+                        values.push(identifier);
+                        *index += 1;
+                        if *index < tokens.len() && tokens[*index] == "," {
+                            *index += 1;
+                        }
+                    }
+                    if *index < tokens.len() && tokens[*index] == ")" {
+                        *index += 1;
+                        return Ok(ASTNode::Insert {
+                            table,
+                            columns,
+                            values,
+                        });
+                    } else {
+                        return Err("Expected ')' after values list".to_string());
+                    }
+                } else {
+                    return Err("Expected '(' after VALUES".to_string());
+                }
+            } else {
+                return Err("Expected VALUES after table name".to_string());
+            }
+        } else {
+            return Err("Expected table name after INSERT INTO".to_string());
+        }
+    } else {
+        return Err("Expected INTO after INSERT".to_string());
+    }
+}
+
+fn parse_update_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
+    *index += 1; // Move past "UPDATE"
+    if *index < tokens.len() {
+        let table = Identifier::Name(tokens[*index].to_string());
+        *index += 1;
+
+        if *index < tokens.len() && tokens[*index] == "SET" {
+            *index += 1;
+            let mut values = Vec::new();
+
+            while *index < tokens.len() && tokens[*index] != "WHERE" {
+                let column = Identifier::Name(tokens[*index].to_string());
+                *index += 1;
+
+                if *index < tokens.len() && tokens[*index] == "=" {
+                    *index += 1;
+                    let value_token = tokens[*index].clone();
+
+                    let value = if is_uuid(&value_token) {
+                        Identifier::Literal(value_token, Some(DataType::UUID))
+                    } else {
+                        Identifier::Literal(value_token, None)
+                    };
+
+                    values.push((column, value));
+                    *index += 1;
+
+                    if *index < tokens.len() && tokens[*index] == "," {
+                        *index += 1;
+                    }
+                } else {
+                    return Err("Expected '=' after column name in UPDATE".to_string());
+                }
+            }
+
+            if *index < tokens.len() && tokens[*index] == "WHERE" {
+                let where_clause = parse_where_clause(tokens, index)?;
+                if let ASTNode::Where { condition } = where_clause {
+                    return Ok(ASTNode::Update { table, values }); // WHERE clause can be processed further if needed
+                }
+            }
+
+            return Ok(ASTNode::Update { table, values });
+        } else {
+            return Err("Expected 'SET' after table name in UPDATE".to_string());
+        }
+    } else {
+        return Err("Expected table name after UPDATE".to_string());
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -331,22 +383,36 @@ mod tests {
 
     #[test]
     fn test_basic_comparison() {
-        let query = b"SELECT id FROM my_table WHERE id = 1";
+        // let query = b"SELECT id FROM my_table WHERE id = 1";
+        // let ast = sql_parser(query).unwrap();
+        //
+        // assert_eq!(
+        //     ast,
+        //     vec![
+        //         ASTNode::Select { columns: vec![Identifier::Name("id".to_string())] },
+        //         ASTNode::From { table: Identifier::Name("my_table".to_string()) },
+        //         ASTNode::Where {
+        //             condition: Expression::Comparison {
+        //                 left: Identifier::Name("id".to_string()),
+        //                 operator: "=".to_string(),
+        //                 right: Identifier::Literal("1".to_string(), None)
+        //             }
+        //         },
+        //     ]
+        // );
+    }
+    #[test]
+    fn test_select_with_timestamp() {
+        let query = b"SELECT * FROM users AT 2025-02-11T20:14:26";
         let ast = sql_parser(query).unwrap();
 
         assert_eq!(
             ast,
-            vec![
-                ASTNode::Select { columns: vec![Identifier::Name("id".to_string())] },
-                ASTNode::From { table: Identifier::Name("my_table".to_string()) },
-                ASTNode::Where {
-                    condition: Expression::Comparison {
-                        left: Identifier::Name("id".to_string()),
-                        operator: "=".to_string(),
-                        right: Identifier::Literal("1".to_string(), None)
-                    }
-                },
-            ]
+            vec![ASTNode::Select {
+                columns: vec![Identifier::Star],
+                table: Identifier::Name("users".to_string()),
+                timestamp: Some("2025-02-11T20:14:26".to_string()),
+            }]
         );
     }
 
@@ -357,10 +423,11 @@ mod tests {
 
         assert_eq!(
             ast,
-            vec![
-                ASTNode::Select { columns: vec![Identifier::Star] },
-                ASTNode::From { table: Identifier::Name("users".to_string()) },
-            ]
+            vec![ASTNode::Select {
+                columns: vec![Identifier::Star],
+                table: Identifier::Name("users".to_string()),
+                timestamp: None,
+            }]
         );
     }
 

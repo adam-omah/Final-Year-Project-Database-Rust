@@ -136,8 +136,8 @@ async fn test_application() -> Result<()> {
         };
         if !schema.lock().unwrap().tables.contains_key("users") {
             create_table(&user_table, &app_state)?;
-            insert_row("users", vec!["1".to_string(), "Alice".to_string()],&app_state)?;
-            insert_row("users", vec!["2".to_string(), "Bob".to_string()],&app_state)?;
+            insert_row("users", vec!["1".to_string(), "Alice".to_string()],&app_state).await?;
+            insert_row("users", vec!["2".to_string(), "Bob".to_string()],&app_state).await?;
         };
     };
 

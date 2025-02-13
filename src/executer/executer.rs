@@ -383,6 +383,7 @@ pub fn evaluate_where_clause(
 ) -> bool {
     // Normalize column names to uppercase
     let column_names_upper: Vec<String> = column_names.iter().map(|col| col.to_uppercase()).collect();
+    debug!("Evaluating WHERE clause for UPDATE: {:?}", condition);
 
     match condition {
         Expression::Comparison { left, operator, right } => {

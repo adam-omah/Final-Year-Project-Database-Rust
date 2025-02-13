@@ -55,7 +55,7 @@ pub async fn insert_row(
     // Serialize validated row using `quote_if_needed`
     let serialized_row = validated_row
         .iter()
-        .map(|value| quote_if_needed(value)) // Apply `quote_if_needed` before writing to storage
+        .map(|value| quote_if_needed(value))
         .collect::<Vec<String>>()
         .join(",");
 
@@ -84,29 +84,39 @@ pub async fn update_row(
         .join(state.config.table_dir.as_path())
         .join(&updates_table_name);
 
-    // Add UUID to the row data
+    // Add UUID to updated_values *before* validation
     updated_values.insert("UUID".to_string(), uuid.to_string());
-    // Validate and process the updated row
+
     let validated_row = validate_and_process_row(table_name, updated_values, state)?;
 
-    // Serialize the row for writing using `quote_if_needed`
+    // Get the index of the "UUID" column
+    let uuid_index = state.schema.lock().unwrap().tables.get(&format!("{}_initial", table_name))
+        .and_then(|table| table.columns.iter().position(|col| col.name == "UUID"));
+
+    // Serialize the row, conditionally quoting values
     let serialized_row = validated_row
         .iter()
-        .map(|value| {
-            if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
-                value.to_string() // Keep numbers as-is
-            } else {
-                quote_if_needed(value) // Use helper function for quoting
+        .enumerate()
+        .map(|(i, val)| {
+            if let Some(uuid_idx) = uuid_index {
+                if i == uuid_idx {
+                    return val.to_string();
+                }
             }
+            quote_if_needed(val)
         })
         .collect::<Vec<String>>()
         .join(",");
 
-    // Open the `_updates` table file in append-only mode and write the data
-    let mut writer = open_table_file_append_only(&updates_table_path)?;
+
+    let mut writer = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&updates_table_path)?;
+
     write_newline_if_needed(&updates_table_path)?;
-    writeln!(writer, "{}", serialized_row)
-        .map_err(|e| std::io::Error::new(e.kind(), format!("Failed to write update to file: {}", e)))?;
+
+    writeln!(writer, "{}", serialized_row)?;
 
     // Recalculate the current state after an update
     let initial_table_name = format!("{}_initial", table_name);
@@ -119,6 +129,7 @@ pub async fn update_row(
 
     Ok(())
 }
+
 
 
 
@@ -273,12 +284,17 @@ pub(crate) fn extract_literal_value(identifier: &Identifier) -> String {
 }
 
 fn quote_if_needed(value: &str) -> String {
-    if value.starts_with('"') && value.ends_with('"') {
-        value[1..value.len() - 1].to_string() // Remove existing quotes for consistent storage
-    } else {
-        value.to_string() // Store as-is if there are no quotes
+    // Check if the value is a valid number
+    if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
+        return value.to_string(); // Return as-is for numbers
+    }else {
+        return format!("\"{}\"", value.replace('\"', "\\\"")); // Escape quotes within the value
     }
+
+    // Return the value as-is if no quotes are needed
+    // value.to_string()
 }
+
 
 
 

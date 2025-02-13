@@ -109,26 +109,53 @@ fn tokenize_query(query_str: &str) -> Result<Vec<String>, String> {
     for char in query_str.chars() {
         if char == '"' {
             in_string = !in_string; // Toggle string mode
-            if !in_string {
-                tokens.push(current_token.clone());
-                current_token.clear();
+            if !in_string {  // Closing quote
+                if !current_token.is_empty() {
+                    tokens.push(current_token.clone());
+                    current_token.clear();
+                }
+            } else { // Opening quote
+                if !current_token.is_empty() {
+                    tokens.push(current_token.clone());
+                    current_token.clear();
+                }
             }
         } else if in_string {
             current_token.push(char);
-        } else if char.is_whitespace() || "()".contains(char) {
+        } else if char == ',' && !in_string {  // Treat comma as a separate token outside strings
             if !current_token.is_empty() {
-                tokens.push(current_token.clone());
+                tokens.push(current_token.trim().to_string()); // Trim whitespace
                 current_token.clear();
             }
-            if !" ".contains(char) {
-                tokens.push(char.to_string());
+            tokens.push(",".to_string()); // Add the comma as a token
+        }
+        else if char == '(' && !in_string {
+            if !current_token.is_empty() {
+                tokens.push(current_token.trim().to_string());
+                current_token.clear();
+            }
+            tokens.push("(".to_string());
+        } else if char == ')' && !in_string {
+            if !current_token.is_empty() {
+                tokens.push(current_token.trim().to_string());
+                current_token.clear();
+            }
+            tokens.push(")".to_string());
+        }
+
+
+        else if char.is_whitespace() {
+            if !current_token.is_empty() {
+                tokens.push(current_token.trim().to_string()); // Trim whitespace
+                current_token.clear();
             }
         } else {
             current_token.push(char);
         }
     }
+
     if !current_token.is_empty() {
-        tokens.push(current_token);
+        tokens.push(current_token.trim().to_string());
     }
 
     Ok(tokens)
@@ -325,52 +352,60 @@ fn parse_insert_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
 
 fn parse_update_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
     *index += 1; // Move past "UPDATE"
-    if *index < tokens.len() {
-        let table = Identifier::Name(tokens[*index].to_string());
+
+    // Parse table name
+    if *index >= tokens.len() {
+        return Err("Expected table name after 'UPDATE'".to_string());
+    }
+    let table = Identifier::Name(tokens[*index].to_string());
+    *index += 1;
+
+    // Parse 'SET' keyword
+    if *index >= tokens.len() || tokens[*index] != "SET" {
+        return Err("Expected 'SET' after table name in 'UPDATE'".to_string());
+    }
+    *index += 1;
+
+    // Parse key-value pairs in the 'SET' clause
+    let mut values = Vec::new();
+    while *index < tokens.len() && tokens[*index] != "WHERE" {
+        // Parse the column name
+        if *index >= tokens.len() {
+            return Err("Expected column name in 'SET' clause".to_string());
+        }
+        let column = Identifier::Name(tokens[*index].to_string());
         *index += 1;
 
-        if *index < tokens.len() && tokens[*index] == "SET" {
-            *index += 1;
-            let mut values = Vec::new();
-
-            while *index < tokens.len() && tokens[*index] != "WHERE" {
-                let column = Identifier::Name(tokens[*index].to_string());
-                *index += 1;
-
-                if *index < tokens.len() && tokens[*index] == "=" {
-                    *index += 1;
-                    let value_token = tokens[*index].clone();
-
-                    let value = if is_uuid(&value_token) {
-                        Identifier::Literal(value_token, Some(DataType::UUID))
-                    } else {
-                        Identifier::Literal(value_token, None)
-                    };
-
-                    values.push((column, value));
-                    *index += 1;
-
-                    if *index < tokens.len() && tokens[*index] == "," {
-                        *index += 1;
-                    }
-                } else {
-                    return Err("Expected '=' after column name in UPDATE".to_string());
-                }
-            }
-
-            if *index < tokens.len() && tokens[*index] == "WHERE" {
-                let where_clause = parse_where_clause(tokens, index)?;
-                if let ASTNode::Where { condition } = where_clause {
-                    return Ok(ASTNode::Update { table, values }); // WHERE clause can be processed further if needed
-                }
-            }
-
-            return Ok(ASTNode::Update { table, values });
-        } else {
-            return Err("Expected 'SET' after table name in UPDATE".to_string());
+        // Parse the assignment operator '='
+        if *index >= tokens.len() || tokens[*index] != "=" {
+            return Err("Expected '=' after column name in 'SET' clause".to_string());
         }
-    } else {
-        return Err("Expected table name after UPDATE".to_string());
+        *index += 1;
+
+        // Parse the value
+        if *index >= tokens.len() {
+            return Err("Expected value after '=' in 'SET' clause".to_string());
+        }
+        let value_token = tokens[*index].clone();
+        let value = if is_uuid(&value_token) {
+            Identifier::Literal(value_token, Some(DataType::UUID))
+        } else {
+            Identifier::Literal(value_token, None)
+        };
+        values.push((column, value));
+        *index += 1;
+
+        // Skip commas if multiple key-value pairs
+        if *index < tokens.len() && tokens[*index] == "," {
+            *index += 1;
+        }
+    }
+
+    // Enforce the presence of the 'WHERE' clause
+    if *index >= tokens.len() || tokens[*index] != "WHERE" {
+        return Err("Expected 'WHERE' clause after 'SET' in 'UPDATE'".to_string());
+    }else {
+        Ok(ASTNode::Update { table, values })
     }
 }
 

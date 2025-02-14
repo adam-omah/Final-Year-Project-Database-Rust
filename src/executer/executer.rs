@@ -11,10 +11,6 @@ use uuid::Uuid;
 use crate::query::parser;
 use crate::records::table::extract_literal_value;
 
-// Import your table functions
-
-
-
 pub async fn execute_query(
     ast_nodes: Vec<ASTNode>,
     data: web::Data<AppState>,
@@ -23,6 +19,14 @@ pub async fn execute_query(
     info!("Executing query with {} AST nodes", ast_nodes.len());
     let mut where_clause: Option<Expression> = None;
 
+    // Iterate through AST nodes to extract the WHERE clause (if any)
+    for ast_node in ast_nodes.iter() {
+        if let ASTNode::Where { condition } = ast_node {
+            where_clause = Some(condition.clone());
+            break; // Extract only the first WHERE clause
+        }
+    }
+    debug!("WHERE clause: {:?}", where_clause);
     for (i, ast_node) in ast_nodes.iter().enumerate() {
         match ast_node {
             ASTNode::Select { columns, table, timestamp } => {
@@ -35,7 +39,7 @@ pub async fn execute_query(
                 return handle_insert(table, values, columns, &data).await;
             }
             ASTNode::Update { table, values } => {
-                return handle_update(table, values, &data, &ast_nodes, i).await;
+                return handle_update(table, values, &data, &where_clause).await;
             }
             _ => {
                 return HttpResponse::BadRequest().body("Unsupported AST Node type");
@@ -63,7 +67,21 @@ async fn handle_select(
 
         // Handle table data retrieval
         match table_data_result {
-            Ok(table_data) => {
+            Ok(mut table_data) => {
+                // If a WHERE clause exists, filter the rows based on it
+                if let Some(condition) = &where_clause {
+                    let column_names = match get_column_names_from_schema(&data, table_name) {
+                        Ok(names) => names,
+                        Err(_) => return HttpResponse::InternalServerError().body("Error fetching column names"),
+                    };
+
+                    table_data = table_data
+                        .into_iter()
+                        .filter(|row| evaluate_where_clause(condition, row, &column_names))
+                        .collect();
+                }
+
+                // Process the SELECT query
                 let result = process_select(columns, &table_data, data.clone(), table_name, where_clause).await;
 
                 if result.is_empty() {
@@ -171,8 +189,7 @@ async fn handle_update(
     table: &Identifier,
     values: &[(Identifier, Identifier)],
     data: &web::Data<AppState>,
-    ast_nodes: &[ASTNode],
-    current_index: usize,
+    where_clause: &Option<Expression>,
 ) -> HttpResponse {
     if let Identifier::Name(table_name) = table {
         let mut updated_values = HashMap::new();
@@ -184,21 +201,13 @@ async fn handle_update(
             updated_values.insert(col_name, value);
         }
 
-        // Check for the WHERE clause
-        let mut where_clause: Option<Expression> = None;
-        if current_index + 1 < ast_nodes.len() {
-            if let ASTNode::Where { condition } = &ast_nodes[current_index + 1] {
-                where_clause = Some(condition.clone());
-            }
-        }
-
         // Ensure a WHERE clause is provided
         if where_clause.is_none() {
             return HttpResponse::BadRequest().body("UPDATE must include a WHERE clause with a valid UUID");
         }
 
-        let condition = where_clause.unwrap();
-        if !is_uuid_where_clause(&condition) {
+        let condition = where_clause.as_ref().unwrap();
+        if !is_uuid_where_clause(condition) {
             return HttpResponse::BadRequest().body(format!(
                 "WHERE clause must contain a valid UUID condition for table '{}'",
                 table_name
@@ -218,7 +227,7 @@ async fn handle_update(
                 // Filter rows based on the WHERE clause
                 let filtered_rows: Vec<_> = initial_data
                     .iter()
-                    .filter(|row| evaluate_where_clause(&condition, row, &column_names))
+                    .filter(|row| evaluate_where_clause(condition, row, &column_names))
                     .collect();
 
                 if filtered_rows.is_empty() {
@@ -347,7 +356,6 @@ pub fn evaluate_where_clause(
 ) -> bool {
     // Normalize column names to uppercase
     let column_names_upper: Vec<String> = column_names.iter().map(|col| col.to_uppercase()).collect();
-    debug!("Evaluating WHERE clause for UPDATE: {:?}", condition);
 
     match condition {
         Expression::Comparison { left, operator, right } => {

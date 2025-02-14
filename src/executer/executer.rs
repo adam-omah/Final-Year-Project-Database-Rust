@@ -21,270 +21,234 @@ pub async fn execute_query(
     _req: HttpRequest,
 ) -> HttpResponse {
     info!("Executing query with {} AST nodes", ast_nodes.len());
+    let mut where_clause: Option<Expression> = None;
 
-    let mut where_clause: Option<Expression> = None; // Store the WHERE clause (if any)
-
-    for i in 0..ast_nodes.len() {
-        match &ast_nodes[i] {
+    for (i, ast_node) in ast_nodes.iter().enumerate() {
+        match ast_node {
             ASTNode::Select { columns, table, timestamp } => {
-                if let Identifier::Name(table_name) = table {
-                    // Check if a timestamp is provided
-                    if let Some(timestamp) = timestamp {
-                        // Fetch data at the given timestamp
-                        match get_table_at_timestamp(data.clone(), table_name, timestamp.clone()).await {
-                            Ok(table_data) => {
-                                let result = process_select(
-                                    columns,
-                                    &table_data,
-                                    data.clone(),
-                                    table_name,
-                                    where_clause.clone(),
-                                )
-                                    .await;
-
-                                if result.is_empty() {
-                                    return HttpResponse::Ok().body("No rows found");
-                                }
-
-                                match serde_json::to_string(&result) {
-                                    Ok(json) => return HttpResponse::Ok().body(json),
-                                    Err(e) => {
-                                        return HttpResponse::InternalServerError()
-                                            .body(format!("Serialization error: {}", e))
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                if e.kind() == std::io::ErrorKind::NotFound {
-                                    return HttpResponse::NotFound().body("Table data not found");
-                                } else {
-                                    return HttpResponse::InternalServerError()
-                                        .body(format!("Error retrieving table data: {}", e));
-                                }
-                            }
-                        }
-                    } else {
-                        // Normal `SELECT * FROM table_name` without timestamp
-                        match get_table_data(data.clone(), table_name).await {
-                            Ok(table_data) => {
-                                let result = process_select(
-                                    columns,
-                                    &table_data,
-                                    data.clone(),
-                                    table_name,
-                                    where_clause.clone(),
-                                )
-                                    .await;
-
-                                if result.is_empty() {
-                                    return HttpResponse::Ok().body("No rows found");
-                                }
-
-                                match serde_json::to_string(&result) {
-                                    Ok(json) => return HttpResponse::Ok().body(json),
-                                    Err(e) => return HttpResponse::InternalServerError().body(format!(
-                                        "Serialization error: {}",
-                                        e
-                                    )),
-                                }
-                            }
-                            Err(e) => {
-                                if e.kind() == std::io::ErrorKind::NotFound {
-                                    return HttpResponse::NotFound().body("Table not found");
-                                } else {
-                                    return HttpResponse::InternalServerError()
-                                        .body(format!("Error retrieving table data: {}", e));
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    return HttpResponse::BadRequest().body("Invalid table name");
-                }
+                return handle_select(columns, table, timestamp, &data, where_clause.clone()).await;
             }
-
-
-            // Handle CREATE TABLE statement
             ASTNode::Create { table, columns } => {
-                if let Identifier::Name(table_name) = table {
-                    // Map columns to schema::Column, extracting name and data type
-                    let table = schema::Table {
-                        name: table_name.to_string(),
-                        columns: columns
-                            .iter()
-                            .filter_map(|(name, col_type)| {
-                                if let (Identifier::Name(col_name), Identifier::Name(type_name)) = (name, col_type)
-                                {
-                                    let data_type = schema::DataType::from(type_name.as_str()); // Convert type name to DataType
-                                    Some(schema::Column {
-                                        name: col_name.clone(), // Extract column name
-                                        data_type,
-                                        rules: vec![],
-                                    })
-                                } else {
-                                    None // Skip invalid/unsupported columns
-                                }
-                            })
-                            .collect(),
-                    };
-
-                    // Try to create the table
-                    match create_table(&table, &data) {
-                        Ok(_) => return HttpResponse::Ok().body("Table Created"),
-                        Err(err) => {
-                            return HttpResponse::InternalServerError()
-                                .body(format!("Error creating table: {}", err))
-                        }
-                    }
-                } else {
-                    return HttpResponse::BadRequest().body("Invalid table name in CREATE TABLE");
-                }
+                return handle_create_table(table, columns, &data);
             }
-
-            // Handle INSERT statement
             ASTNode::Insert { table, values, columns } => {
-                if let Identifier::Name(table_name) = table {
-                    // Convert values: Vec<Identifier> to Vec<String>
-                    let mut row_data: Vec<String> = values
-                        .iter()
-                        .filter_map(|value| match value {
-                            Identifier::Literal(lit, _) => Some(lit.clone()), // Grab the value for literals
-                            _ => None, // Ignore invalid types (e.g., non-literal identifiers)
-                        })
-                        .collect();
-
-                    // Generate a UUID for rows if needed and prepend to row_data
-                    let uuid = Uuid::new_v4().to_string();
-                    row_data.insert(0, uuid); // Insert UUID as the first column (if schema requires it)
-
-                    // Validate and handle column names (if provided)
-                    let _column_names: Option<Vec<String>> = if columns.is_empty() {
-                        None // No columns provided
-                    } else {
-                        // Convert columns: Vec<Identifier> to Option<Vec<String>>
-                        Some(
-                            columns
-                                .iter()
-                                .filter_map(|col| match col {
-                                    Identifier::Name(col_name) => Some(col_name.clone()), // Grab column names
-                                    _ => None, // Ignore invalid types
-                                })
-                                .collect(),
-                        )
-                    };
-                    // Call insert_row with updated row_data (including UUID)
-                    match insert_row(table_name.as_str(), row_data, &data).await {
-                        Ok(_) => return HttpResponse::Ok().body("Row inserted"),
-                        Err(err) => {
-                            return HttpResponse::InternalServerError()
-                                .body(format!("Error inserting row: {}", err))
-                        }
-                    }
-                } else {
-                    return HttpResponse::BadRequest().body("Invalid table name in INSERT statement");
-                }
+                return handle_insert(table, values, columns, &data).await;
             }
-
             ASTNode::Update { table, values } => {
-                if let Identifier::Name(table_name) = table {
-                    let mut updated_values = HashMap::new();
-
-                    // Extract column names and their updated values
-                    for (col_identifier, val_identifier) in values {
-                        let col_name = extract_column_name(&col_identifier);
-                        let value = extract_literal_value(&val_identifier);
-                        updated_values.insert(col_name, value);
-                    }
-
-                    // Check for WHERE clause
-                    let mut where_clause: Option<Expression> = None;
-                    if i + 1 < ast_nodes.len() {
-                        if let ASTNode::Where { condition } = &ast_nodes[i + 1] {
-                            where_clause = Some(condition.clone());
-                        }
-                    }
-
-                    // Enforce that a WHERE clause **must** exist
-                    if where_clause.is_none() {
-                        return HttpResponse::BadRequest()
-                            .body("UPDATE must include a WHERE clause with a valid UUID");
-                    }
-
-                    // Validate that the WHERE clause specifies the UUID column
-                    let condition = where_clause.as_ref().unwrap();
-                    if !is_uuid_where_clause(condition) {
-                        return HttpResponse::BadRequest()
-                            .body(format!(
-                                "WHERE clause must contain a valid UUID condition for table '{}'",
-                                table_name
-                            ));
-                    }
-
-                    // Load the initial table data
-                    let initial_table_name = format!("{}_initial", table_name);
-                    let initial_table_path = Path::new(&data.config.db_dir)
-                        .join(&data.config.table_dir)
-                        .join(&initial_table_name);
-
-                    match load_table_data_from_file(&initial_table_path) {
-                        Ok(initial_data) => {
-                            // Fetch column names
-                            let column_names = get_column_names_from_schema(&data, table_name).unwrap_or_default();
-
-                            // Filter rows based on the WHERE clause
-                            let filtered_rows: Vec<_> = initial_data
-                                .iter()
-                                .filter(|row| evaluate_where_clause(condition, row, &column_names))
-                                .collect();
-
-                            // If no rows satisfy the condition, return an appropriate response
-                            if filtered_rows.is_empty() {
-                                return HttpResponse::NotFound()
-                                    .body("No rows matched the specified condition");
-                            }
-
-                            // Perform updates on filtered rows only
-                            for row in &filtered_rows {
-                                if let Some(row_id) = row.get(0) {
-                                    if let Err(e) = update_row(table_name, row_id, updated_values.clone(), &data).await {
-                                        return HttpResponse::InternalServerError()
-                                            .body(format!("Error updating row: {}", e));
-                                    }
-                                }
-                            }
-
-                            // Recalculate the table's current view
-                            if let Err(e) = recalculate_current(&data, table_name, initial_data).await {
-                                return HttpResponse::InternalServerError()
-                                    .body(format!("Error recalculating data: {}", e));
-                            }else{
-                                return HttpResponse::Ok().body("Rows updated");
-                            }
-                        }
-                        Err(e) => { return HttpResponse::InternalServerError()
-                            .body(format!("Error loading initial data: {}", e))}
-                    }
-                } else {
-                    HttpResponse::BadRequest().body("Invalid table name in UPDATE statement");
-                }
+                return handle_update(table, values, &data, &ast_nodes, i).await;
             }
-
-
-
-
-
-            // If there's a WHERE clause without a SELECT or FROM
-            ASTNode::Where { .. } => {
-
+            _ => {
+                return HttpResponse::BadRequest().body("Unsupported AST Node type");
             }
-
-            // Handle other AST nodes as needed
-            _ => return HttpResponse::BadRequest().body("Unsupported AST Node type"),
         }
     }
 
     HttpResponse::BadRequest().body("No valid SQL query provided")
 }
+
+async fn handle_select(
+    columns: &[Identifier],
+    table: &Identifier,
+    timestamp: &Option<String>,
+    data: &web::Data<AppState>,
+    where_clause: Option<Expression>,
+) -> HttpResponse {
+    if let Identifier::Name(table_name) = table {
+        // Retrieve table data
+        let table_data_result = if let Some(timestamp) = timestamp {
+            get_table_at_timestamp(data.clone(), table_name, timestamp.clone()).await
+        } else {
+            get_table_data(data.clone(), table_name).await
+        };
+
+        // Handle table data retrieval
+        match table_data_result {
+            Ok(table_data) => {
+                let result = process_select(columns, &table_data, data.clone(), table_name, where_clause).await;
+
+                if result.is_empty() {
+                    HttpResponse::Ok().body("No rows found")
+                } else {
+                    match serde_json::to_string(&result) {
+                        Ok(json) => HttpResponse::Ok().body(json),
+                        Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
+                    }
+                }
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    HttpResponse::NotFound().body("Table data not found")
+                } else {
+                    HttpResponse::InternalServerError().body(format!("Error retrieving table data: {}", e))
+                }
+            }
+        }
+    } else {
+        HttpResponse::BadRequest().body("Invalid table name")
+    }
+}
+
+fn handle_create_table(
+    table: &Identifier,
+    columns: &[(Identifier, Identifier)],
+    data: &web::Data<AppState>,
+) -> HttpResponse {
+    if let Identifier::Name(table_name) = table {
+        // Build schema::Table from AST
+        let schema_table = schema::Table {
+            name: table_name.to_string(),
+            columns: columns
+                .iter()
+                .filter_map(|(name, col_type)| {
+                    if let (Identifier::Name(col_name), Identifier::Name(type_name)) = (name, col_type) {
+                        let data_type = schema::DataType::from(type_name.as_str());
+                        Some(schema::Column {
+                            name: col_name.clone(),
+                            data_type,
+                            rules: vec![],
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        };
+
+        // Execute the table creation
+        match create_table(&schema_table, data) {
+            Ok(_) => HttpResponse::Ok().body("Table Created"),
+            Err(err) => HttpResponse::InternalServerError().body(format!("Error creating table: {}", err)),
+        }
+    } else {
+        HttpResponse::BadRequest().body("Invalid table name in CREATE TABLE")
+    }
+}
+
+async fn handle_insert(
+    table: &Identifier,
+    values: &[Identifier],
+    columns: &[Identifier],
+    data: &web::Data<AppState>,
+) -> HttpResponse {
+    if let Identifier::Name(table_name) = table {
+        let mut row_data: Vec<String> = values
+            .iter()
+            .filter_map(|value| match value {
+                Identifier::Literal(lit, _) => Some(lit.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let uuid = Uuid::new_v4().to_string();
+        row_data.insert(0, uuid); // Add UUID as the first column
+
+        // Optionally handle column names
+        let _column_names = if columns.is_empty() {
+            None
+        } else {
+            Some(
+                columns
+                    .iter()
+                    .filter_map(|col| match col {
+                        Identifier::Name(col_name) => Some(col_name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        // Insert the row into the table
+        match insert_row(table_name, row_data, data).await {
+            Ok(_) => HttpResponse::Ok().body("Row inserted"),
+            Err(err) => HttpResponse::InternalServerError().body(format!("Error inserting row: {}", err)),
+        }
+    } else {
+        HttpResponse::BadRequest().body("Invalid table name in INSERT statement")
+    }
+}
+
+async fn handle_update(
+    table: &Identifier,
+    values: &[(Identifier, Identifier)],
+    data: &web::Data<AppState>,
+    ast_nodes: &[ASTNode],
+    current_index: usize,
+) -> HttpResponse {
+    if let Identifier::Name(table_name) = table {
+        let mut updated_values = HashMap::new();
+
+        // Map values to a HashMap of column names and their updated values
+        for (col_identifier, val_identifier) in values {
+            let col_name = extract_column_name(col_identifier);
+            let value = extract_literal_value(val_identifier);
+            updated_values.insert(col_name, value);
+        }
+
+        // Check for the WHERE clause
+        let mut where_clause: Option<Expression> = None;
+        if current_index + 1 < ast_nodes.len() {
+            if let ASTNode::Where { condition } = &ast_nodes[current_index + 1] {
+                where_clause = Some(condition.clone());
+            }
+        }
+
+        // Ensure a WHERE clause is provided
+        if where_clause.is_none() {
+            return HttpResponse::BadRequest().body("UPDATE must include a WHERE clause with a valid UUID");
+        }
+
+        let condition = where_clause.unwrap();
+        if !is_uuid_where_clause(&condition) {
+            return HttpResponse::BadRequest().body(format!(
+                "WHERE clause must contain a valid UUID condition for table '{}'",
+                table_name
+            ));
+        }
+
+        // Load data to process the update
+        let initial_table_name = format!("{}_initial", table_name);
+        let initial_table_path = Path::new(&data.config.db_dir)
+            .join(&data.config.table_dir)
+            .join(&initial_table_name);
+
+        match load_table_data_from_file(&initial_table_path) {
+            Ok(initial_data) => {
+                let column_names = get_column_names_from_schema(data, table_name).unwrap_or_default();
+
+                // Filter rows based on the WHERE clause
+                let filtered_rows: Vec<_> = initial_data
+                    .iter()
+                    .filter(|row| evaluate_where_clause(&condition, row, &column_names))
+                    .collect();
+
+                if filtered_rows.is_empty() {
+                    return HttpResponse::NotFound().body("No rows matched the specified condition");
+                }
+
+                // Apply updates to the filtered rows
+                for row in &filtered_rows {
+                    if let Some(row_id) = row.get(0) {
+                        if let Err(e) = update_row(table_name, row_id, updated_values.clone(), data).await {
+                            return HttpResponse::InternalServerError().body(format!("Error updating row: {}", e));
+                        }
+                    }
+                }
+
+                if let Err(e) = recalculate_current(data, table_name, initial_data).await {
+                    return HttpResponse::InternalServerError()
+                        .body(format!("Error recalculating data: {}", e));
+                }
+
+                HttpResponse::Ok().body("Rows updated")
+            }
+            Err(e) => HttpResponse::InternalServerError().body(format!("Error loading initial data: {}", e)),
+        }
+    } else {
+        HttpResponse::BadRequest().body("Invalid table name in UPDATE statement")
+    }
+}
+
+
 
 fn extract_column_name(identifier: &Identifier) -> String {
     match identifier {

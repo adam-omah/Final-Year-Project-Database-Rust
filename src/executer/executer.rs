@@ -8,6 +8,7 @@ use crate::{AppState};
 use actix_web::{post, web, HttpRequest, HttpResponse};
 use tracing::log::{debug, info};
 use uuid::Uuid;
+use regex::Regex;
 use crate::query::parser;
 use crate::records::table::extract_literal_value;
 
@@ -263,7 +264,7 @@ fn extract_column_name(identifier: &Identifier) -> String {
     match identifier {
         Identifier::Name(name) => name.to_string(),
         Identifier::Literal(value, ..) => value.to_string(),
-        &parser::Identifier::Star => todo!(), // Or handle literal column names if needed
+        Identifier::Star => "*".parse().unwrap(),
     }
 }
 fn is_uuid_where_clause(condition: &Expression) -> bool {
@@ -354,42 +355,38 @@ pub fn evaluate_where_clause(
     row: &[String],
     column_names: &[String],
 ) -> bool {
-    // Normalize column names to uppercase
     let column_names_upper: Vec<String> = column_names.iter().map(|col| col.to_uppercase()).collect();
 
     match condition {
         Expression::Comparison { left, operator, right } => {
-            // Resolve the left value
+            // Resolve left value
             let left_value = match left {
                 Identifier::Name(name) => {
-                    // Normalize the column name in `name` to uppercase and match against `column_names_upper`
                     let index_result = find_column_index(&column_names_upper, &name.to_uppercase());
-                    index_result.and_then(|index| row.get(index).map(|s| s.to_string()))
+                    index_result.and_then(|index| row.get(index).map(String::from))
                 }
-                Identifier::Literal(lit, _) => Some(lit.to_string()),
-                _ => None, // Unsupported identifier type
+                Identifier::Literal(lit, _) => Some(lit.clone()),
+                _ => None, // Unsupported
             };
 
-            // Resolve the right value
+            // Resolve right value
             let right_value = match right {
                 Identifier::Name(name) => {
                     let index_result = find_column_index(&column_names_upper, &name.to_uppercase());
-                    index_result.and_then(|index| row.get(index).map(|s| s.to_string()))
+                    index_result.and_then(|index| row.get(index).map(String::from))
                 }
-                Identifier::Literal(lit, _) => Some(lit.to_string()),
-                _ => None, // Unsupported identifier type
+                Identifier::Literal(lit, _) => Some(lit.clone()),
+                _ => None, // Unsupported
             };
 
-            // Check if either value is None
             if left_value.is_none() || right_value.is_none() {
-                return false; // Unable to evaluate, treat as false
+                return false; // No value to compare
             }
 
-            // Extract resolved values
             let mut left_val = left_value.unwrap();
             let mut right_val = right_value.unwrap();
 
-            // Trim outer quotes if present (to normalize comparison)
+            // Trim quotes to normalize comparison
             left_val = left_val.trim_matches('"').to_string();
             right_val = right_val.trim_matches('"').to_string();
 
@@ -401,8 +398,35 @@ pub fn evaluate_where_clause(
                 "<" => left_val < right_val,
                 ">=" => left_val >= right_val,
                 "<=" => left_val <= right_val,
-                _ => false, // Unsupported operator
+                "LIKE" => {
+                    return evaluate_like_condition(&left_val, &right_val);
+                }
+                _ => false, // Unsupported
             }
+        }
+    }
+}
+
+/// Helper function to evaluate `LIKE` conditions
+fn evaluate_like_condition(left: &str, pattern: &str) -> bool {
+    // Normalize inputs by trimming extra quotes and converting to lowercase
+    let normalized_left = left.trim_matches('"').to_lowercase();
+    let normalized_pattern = pattern
+        .trim_matches('"') // Removes double quotes if present
+        .trim_matches('\'') // Removes single quotes if present
+        .to_lowercase();
+
+    // Convert SQL LIKE pattern to regex
+    let regex_pattern = normalized_pattern
+        .replace('%', ".*") // % matches any sequence of characters
+        .replace('_', "."); // _ matches any single character
+
+    // Create the regex and match
+    match Regex::new(&format!("^{}$", regex_pattern)) {
+        Ok(regex) => regex.is_match(&normalized_left),
+        Err(e) => {
+            debug!("Regex error: {}", e);
+            false
         }
     }
 }

@@ -9,8 +9,8 @@ use tracing::log::debug;
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
 use chrono::NaiveDateTime;
-
-
+use crate::query::parser::Expression;
+use crate::records::table::get_column_values;
 
 // Data types for columns.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,18 +36,19 @@ impl From<&str> for DataType {
 
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RuleType {
+pub enum ConstraintType {
     Unique,
     NotNull,
-    // Add more rule types as needed (e.g., MinLength, MaxLength, etc.)
+    Check(Expression), // Expression is from your parser
+    // ... other types
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Rule {
-    pub rule_type: RuleType,
-    pub action: RuleAction, // Add the action field
-    // You can add fields here for rule-specific parameters (e.g., min length value)
+    pub constraint_type: ConstraintType,
+    pub action: RuleAction,
 }
+
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RuleAction {
@@ -76,6 +77,58 @@ pub struct Schema {
     pub tables: HashMap<String, Table>, // Logical tables (`_initial` and `_updates` handled separately).
 }
 
+pub fn map_string_to_rule(rule_str: &str) -> Option<Rule> {
+    let parts: Vec<&str> = rule_str.split_whitespace().collect();
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let constraint_str = parts[0].to_lowercase();
+
+    // Extract the action, defaulting to Reject
+    let action = if parts.len() > 1 {
+        match parts[1].to_lowercase().as_str() {
+            "set" => {
+                if parts.len() > 3 && parts[2].to_lowercase() == "null" {
+                    Some(RuleAction::SetNull)
+                } else if parts.len() > 3 && parts[2].to_lowercase() == "default" {
+                    Some(RuleAction::SetDefault(parts[3..].join(" ")))
+                } else {
+                    None
+                }
+            }
+            "reject" => Some(RuleAction::Reject),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let constraint_type = match constraint_str.as_str() {
+        "not" => {
+            if parts.len() > 1 && parts[1].to_lowercase() == "null" {
+                Some(ConstraintType::NotNull)
+            } else {
+                None
+            }
+        }
+        "unique" => Some(ConstraintType::Unique),
+        _ => None,
+    };
+
+    match (constraint_type, action) {
+        (Some(c_type), Some(action)) => Some(Rule {
+            constraint_type: c_type,
+            action,
+        }),
+        (Some(c_type), None) => Some(Rule {
+            constraint_type: c_type,
+            action: RuleAction::Reject, // Default action
+        }),
+        _ => None,
+    }
+}
 
 
 pub fn load_schema(config: &DatabaseConfig) -> Result<Schema> {
@@ -122,15 +175,22 @@ pub fn create_table(schema: &mut Schema, table: Table, config: &DatabaseConfig) 
     let uuid_column = Column {
         name: "UUID".to_string(),
         data_type: DataType::UUID,
-        rules: vec![],
+        rules: vec![Rule {
+            constraint_type: ConstraintType::NotNull,
+            action: RuleAction::Reject,
+        }],
     };
 
     // The timestamp column definition (same for both initial and updates tables)
     let timestamp_column = Column {
         name: "timestamp".to_string(),
-        data_type: DataType::DateTime, // Use the DateTime data type
-        rules: vec![], // Add rules if needed
+        data_type: DataType::DateTime,
+        rules: vec![Rule {
+            constraint_type: ConstraintType::NotNull,
+            action: RuleAction::Reject,
+        }],
     };
+
 
     // Insert the UUID column as the first column in both tables
     initial_table.columns.insert(0, uuid_column.clone());
@@ -163,19 +223,17 @@ pub fn create_table(schema: &mut Schema, table: Table, config: &DatabaseConfig) 
 
 
 
+pub async fn check_column_rules(column: &Column, value: &str, table_name: &str,  state: &web::Data<AppState>) -> Result<Option<String>> {
 
+    let mut final_value = Some(value.to_string()); // Start with the original value
 
-pub fn check_column_rules(column: &Column, value: &str) -> Result<Option<String>> {
     for rule in &column.rules {
-        let mut final_value = Some(value.to_string());  // Default, keep original value
-
-        match rule.rule_type {
-            RuleType::NotNull => {
+        match &rule.constraint_type { // Use constraint_type
+            ConstraintType::NotNull => {
                 if value.is_empty() {
                     match &rule.action {
-
-                        RuleAction::SetNull => { final_value = None},
-                        RuleAction::SetDefault(default_value) => { final_value = Some(default_value.clone())},
+                        RuleAction::SetNull => final_value = None,
+                        RuleAction::SetDefault(default_value) => final_value = Some(default_value.clone()),
                         RuleAction::Reject => {
                             return Err(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
@@ -185,19 +243,36 @@ pub fn check_column_rules(column: &Column, value: &str) -> Result<Option<String>
                     }
                 }
             }
-            RuleType::Unique => {/*Add unique handling if needed */}
-            // Handle other rule types here...
-
-        }
-
-        if final_value.is_none() || final_value.as_ref().unwrap().is_empty() {
-            return Ok(None);
-        } else {
-            return Ok(Some(final_value.unwrap()));
+            ConstraintType::Unique => {
+                if !table_name.ends_with("_updates") { // Skip unique check for _updates table
+                    let existing_values = get_column_values(table_name, &column.name, state).await?;
+                    if existing_values.contains(value) {
+                        match &rule.action {
+                            RuleAction::SetNull => final_value = None,
+                            RuleAction::SetDefault(default_value) => final_value = Some(default_value.clone()),
+                            RuleAction::Reject => {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("Unique constraint violated for column '{}', Value '{}' already exists in table.", column.name, value),
+                                ));
+                            }
+                        }
+                    }
+                }
+            },
+            ConstraintType::Check(expression) => {
+                // Here you would evaluate your 'expression' against 'value'
+                // and update 'final_value' according to the Check constraint
+                // and the specified 'action'. This will require code from your
+                // parser to evaluate the expression.
+            }
+            // Handle other rule types as needed
         }
     }
-    Ok(Some(value.to_string())) // Return the original value if no rules or rules passed
+
+    Ok(final_value)
 }
+
 
 pub fn is_valid_data_type(data_type: &DataType, value: &str) -> bool {
     match data_type {
@@ -245,4 +320,3 @@ pub fn get_column_names_from_schema(
         }
     }
 }
-

@@ -109,7 +109,7 @@ async fn handle_select(
 
 fn handle_create_table(
     table: &Identifier,
-    columns: &[(Identifier, Identifier)],
+    columns: &Vec<(Identifier, Identifier, Vec<String>)>,
     data: &web::Data<AppState>,
 ) -> HttpResponse {
     if let Identifier::Name(table_name) = table {
@@ -118,13 +118,19 @@ fn handle_create_table(
             name: table_name.to_string(),
             columns: columns
                 .iter()
-                .filter_map(|(name, col_type)| {
+                .filter_map(|(name, col_type, raw_rules)| {
                     if let (Identifier::Name(col_name), Identifier::Name(type_name)) = (name, col_type) {
                         let data_type = schema::DataType::from(type_name.as_str());
+                        // Map Vec<String> raw_rules into Vec<Rule>
+                        let rules: Vec<schema::Rule> = raw_rules
+                            .iter()
+                            .filter_map(|rule| schema::map_string_to_rule(rule))
+                            .collect();
+
                         Some(schema::Column {
                             name: col_name.clone(),
                             data_type,
-                            rules: vec![],
+                            rules, // Converted rules
                         })
                     } else {
                         None

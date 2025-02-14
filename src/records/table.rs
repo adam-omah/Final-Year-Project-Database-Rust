@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Seek, Write};
 use std::path::Path;
 use crate::query::parser::Identifier;
 use futures::future::BoxFuture;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::log::debug;
 use crate::schema::schema::{check_column_rules, is_valid_data_type};
 use chrono::{NaiveDateTime, Utc};
@@ -45,7 +45,7 @@ pub async fn insert_row(
     for (index, column) in table.columns.iter().enumerate() {
         row_data_map.insert(column.name.clone(), row_data.get(index).cloned().unwrap_or_default());
     }
-    let validated_row = validate_and_process_row(table_name, row_data_map, state)?;
+    let validated_row = validate_and_process_row(table_name, row_data_map, state).await?;
 
     // Prepare the `_initial` table file path
     let initial_table_path = Path::new(state.config.db_dir.as_path())
@@ -87,7 +87,7 @@ pub async fn update_row(
     // Add UUID to updated_values *before* validation
     updated_values.insert("UUID".to_string(), uuid.to_string());
 
-    let validated_row = validate_and_process_row(table_name, updated_values, state)?;
+    let validated_row = validate_and_process_row(table_name, updated_values, state).await?;
 
     // Get the index of the "UUID" column
     let uuid_index = state.schema.lock().unwrap().tables.get(&format!("{}_initial", table_name))
@@ -191,7 +191,7 @@ pub fn load_table_data_from_file(table_path: &Path) -> Result<Vec<Vec<String>>> 
         .collect()
 }
 
-fn validate_and_process_row(
+async fn validate_and_process_row(
     table_name: &str,
     mut row_data: HashMap<String, String>,
     state: &web::Data<AppState>,
@@ -243,14 +243,16 @@ fn validate_and_process_row(
         }
 
         // Validate and transform the value based on column rules
-        let validated_value = check_column_rules(column, &value).and_then(|validated| {
-            validated.ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Constraint violation for column '{}'", column_name),
-                )
-            })
-        })?;
+        let validated_value = check_column_rules(column, &value, table_name, &state)
+            .await // Await the future
+            .and_then(|validated| {  // Now you can use and_then
+                validated.ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Constraint violation for column '{}'", column_name),
+                    )
+                })
+            })?;
 
         validated_row.push(validated_value);
     }
@@ -493,6 +495,37 @@ fn row_timestamp_is_before(row: &Vec<String>, target_timestamp: &NaiveDateTime) 
         false // Exclude rows without a valid timestamp
     }
 }
+
+pub async fn get_column_values(table_name: &str, column_name: &str, state: &web::Data<AppState>) -> Result<HashSet<String>> {
+    let table_data = get_table_data(state.clone(), table_name).await?; // Get the full table data
+
+    let schema = state.schema.lock().unwrap();
+    let initial_table_name = format!("{}_initial", table_name);
+    let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Table '{}' not found in schema", initial_table_name),
+        )
+    })?;
+    // Find the index of the specified column, handling case where the column is not present
+    let column_index = table.columns.iter().position(|col| col.name == column_name);
+
+    let mut values = HashSet::new();
+    // Iterate and extract values for the specified column if it exists, or handle missing column case
+    for row in table_data {
+        if let Some(index) = column_index {
+            if let Some(value) = row.get(index) {
+                values.insert(value.trim_matches('"').to_string());
+            } else {
+                debug!("Row is missing value at index {:?}", index)
+            }
+        } else {
+            debug!("Column named '{}' not found for table '{}'", column_name, initial_table_name)
+        }
+    }
+    Ok(values)
+}
+
 
 #[get("/tables/{table_name}")]
 async fn get_table_api(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {

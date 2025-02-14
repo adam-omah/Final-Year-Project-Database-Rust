@@ -25,6 +25,46 @@
         }
       ]
     },
+    "test_table_updates": {
+      "name": "test_table_updates",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
+        },
+        {
+          "name": "number",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "username",
+          "data_type": "String",
+          "rules": [
+            {
+              "constraint_type": "Unique",
+              "action": "Reject"
+            }
+          ]
+        },
+        {
+          "name": "timestamp",
+          "data_type": "DateTime",
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
+        }
+      ]
+    },
     "users_updates": {
       "name": "users_updates",
       "columns": [
@@ -47,6 +87,46 @@
           "name": "timestamp",
           "data_type": "DateTime",
           "rules": []
+        }
+      ]
+    },
+    "test_table_initial": {
+      "name": "test_table_initial",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
+        },
+        {
+          "name": "number",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "username",
+          "data_type": "String",
+          "rules": [
+            {
+              "constraint_type": "Unique",
+              "action": "Reject"
+            }
+          ]
+        },
+        {
+          "name": "timestamp",
+          "data_type": "DateTime",
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
         }
       ]
     }

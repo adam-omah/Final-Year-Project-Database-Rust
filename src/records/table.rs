@@ -114,7 +114,6 @@ pub async fn update_row(
             }
         })
         .collect::<Vec<String>>();
-    debug!("Current row data: {:#?}", current_row);
     let mut merged_row = HashMap::new();
 
     for (index, column) in table.columns.iter().enumerate() {
@@ -151,20 +150,13 @@ pub async fn update_row(
     writeln!(writer, "{}", serialized_row)?;
 
     // Recalculate the cache to reflect the updated state
-    let initial_data = load_table_data_from_file(
-        &Path::new(state.config.db_dir.as_path())
-            .join(state.config.table_dir.as_path())
-            .join(&initial_table_name),
-    )?;
-    recalculate_current(state, table_name, initial_data).await?;
+    recalculate_row(state, table_name, uuid).await?;
 
     Ok(())
 }
 
 
 pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<AppState>) -> Result<()> {
-    debug!("Processing delete_row for table: {}, uuid: {}", table_name, uuid);
-
     // Construct the `_updates` table name and path
     let updates_table_name = format!("{}_updates", table_name);
     let updates_table_path = Path::new(&state.config.db_dir)
@@ -221,14 +213,7 @@ pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<Ap
     write_newline_if_needed(&updates_table_path)?;
     writeln!(writer, "{}", serialized_row)?;
 
-    // Recalculate the cache by merging `_initial` and `_updates`
-    let initial_data = load_table_data_from_file(
-        &Path::new(state.config.db_dir.as_path())
-            .join(state.config.table_dir.as_path())
-            .join(&initial_table_name),
-    )?;
-    recalculate_current(state, table_name, initial_data).await?;
-
+    recalculate_row(state, table_name, uuid).await?;
     Ok(())
 }
 
@@ -254,7 +239,7 @@ pub fn get_table_data(
             .join(&initial_table_name);
 
         let initial_data = load_table_data_from_file(&initial_table_path)?;
-        recalculate_current(&state, table_name, initial_data.clone()).await?;  //Pass initial_data
+        recalculate_table(&state, table_name, initial_data.clone()).await?;  //Pass initial_data
         // Now, the cache *should* have the updated data
         let cache = state.cache.lock().unwrap();
         cache
@@ -384,7 +369,6 @@ fn open_table_file_append_only(table_path: &Path) -> Result<std::fs::File> {
         })
 }
 
-
 pub(crate) fn extract_literal_value(identifier: &Identifier) -> String {
     match identifier {
         Identifier::Literal(value, _) => value.clone(),
@@ -401,9 +385,6 @@ fn quote_if_needed(value: &str) -> String {
         return format!("\"{}\"", value.replace('\"', "\\\"")); // Escape quotes within the value
     }
 }
-
-
-
 
 fn write_newline_if_needed(table_path: &Path) -> Result<()> {
     // Open the file in read+write mode
@@ -428,7 +409,6 @@ fn write_newline_if_needed(table_path: &Path) -> Result<()> {
     Ok(())
 }
 
-
 async fn add_row_to_cache(
     table_name: &str,
     new_row: Vec<String>,
@@ -449,14 +429,105 @@ async fn add_row_to_cache(
             .join(&initial_table_name);
 
         let initial_data = load_table_data_from_file(&initial_table_path)?;
-        recalculate_current(state, table_name, initial_data).await?;
+        recalculate_table(state, table_name, initial_data).await?;
     }
     Ok(())
 }
 
+pub async fn recalculate_row(
+    state: &web::Data<AppState>,
+    table_name: &str,
+    uuid: &str,
+) -> Result<()> {
+    let mut cache = state.cache.lock().unwrap();
 
+    // Check if the table is in the cache
+    if !cache.contains_key(table_name) {
+        drop(cache); // Unlock before performing expensive calculations
+        let initial_table_name = format!("{}_initial", table_name);
+        let initial_table_path = Path::new(&state.config.db_dir)
+            .join(&state.config.table_dir)
+            .join(&initial_table_name);
 
-pub async fn recalculate_current(
+        let initial_data = load_table_data_from_file(&initial_table_path)?;
+        recalculate_table(state, table_name, initial_data).await?;
+        return Ok(());
+    }
+    drop(cache); // Release the lock after confirming the cache's presence.
+    // Load `_initial` data for the specific UUID
+    let initial_table_name = format!("{}_initial", table_name);
+    let initial_table_path = Path::new(&state.config.db_dir)
+        .join(&state.config.table_dir)
+        .join(&initial_table_name);
+
+    let initial_data = load_table_data_from_file(&initial_table_path)?;
+
+    // Find the row by matching the UUID after full cleaning
+    let cleaned_uuid = uuid.trim_matches('"').to_string();
+    let initial_row = initial_data
+        .into_iter()
+        .find(|row| {
+            if let Some(id) = row.get(0) {
+                let cleaned_id = id.trim_matches('"');
+                return cleaned_id == cleaned_uuid;
+            }
+            false
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::NotFound,
+                format!("Row with UUID '{}' not found in the initial table", uuid),
+            )
+        })?;
+
+    // Load `_updates` data for the specific UUID
+    let updates_table_name = format!("{}_updates", table_name);
+    let updates_table_path = Path::new(&state.config.db_dir)
+        .join(&state.config.table_dir)
+        .join(&updates_table_name);
+
+    let updates_data = load_table_data_from_file(&updates_table_path)?;
+    let relevant_updates: Vec<Vec<String>> = updates_data
+        .into_iter()
+        .filter(|row| {
+            if let Some(id) = row.get(0) {
+                let cleaned_id = id.trim_matches('"');
+                return cleaned_id == cleaned_uuid;
+            }
+            false
+        })
+        .collect();
+
+    // Sort updates in descending order of timestamp
+    let mut sorted_updates = relevant_updates.clone();
+    sorted_updates.sort_by(|a, b| {
+        let a_timestamp = parse_timestamp_from_row(a);
+        let b_timestamp = parse_timestamp_from_row(b);
+        b_timestamp.cmp(&a_timestamp) // Descending order
+    });
+
+    // Combine the initial row with updates into the final row
+    let final_row = merge_row_with_updates(initial_row, sorted_updates);
+
+    // Acquire the lock again to update the specific row in the cache
+    let mut cache = state.cache.lock().unwrap();
+    if let Some(cached_table) = cache.get_mut(table_name) {
+        for row in cached_table.iter_mut() {
+            if let Some(id) = row.get(0) {
+                let cleaned_id = id.trim_matches('"');
+                if cleaned_id == cleaned_uuid {
+                    *row = final_row;
+                    return Ok(()); // Update only the necessary row and exit
+                }
+            }
+        }
+        // If the row is not in the cached table, add it
+        cached_table.push(final_row);
+    }
+    Ok(())
+}
+
+pub async fn recalculate_table(
     state: &web::Data<AppState>,
     table_name: &str,
     initial_table_data: Vec<Vec<String>>,
@@ -472,10 +543,8 @@ pub async fn recalculate_current(
     // Sort updates in descending order of timestamp to ensure the most recent updates are applied
     let mut sorted_updates_data = updates_data.clone();
     sorted_updates_data.sort_by(|a, b| {
-        let a_timestamp = a.iter().find(|col| col.contains("-") && col.contains(":"))
-            .and_then(|timestamp| NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S").ok());
-        let b_timestamp = b.iter().find(|col| col.contains("-") && col.contains(":"))
-            .and_then(|timestamp| NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S").ok());
+        let a_timestamp = parse_timestamp_from_row(a);
+        let b_timestamp = parse_timestamp_from_row(b);
 
         b_timestamp.cmp(&a_timestamp)
     });
@@ -518,6 +587,29 @@ fn merge_table_and_update(
     merged_data
 }
 
+fn merge_row_with_updates(initial_row: Vec<String>, updates: Vec<Vec<String>>) -> Vec<String> {
+    if updates.is_empty() {
+        return initial_row;
+    }
+    let mut current_row = initial_row.clone();
+    for update in updates {
+        for (index, value) in update.iter().enumerate() {
+            if !value.is_empty() && value != "ROW_REMOVED" {
+                current_row[index] = value.clone();
+            }
+        }
+    }
+    current_row
+}
+
+
+fn parse_timestamp_from_row(row: &Vec<String>) -> Option<NaiveDateTime> {
+    row.iter()
+        .find(|col| col.contains("-") && col.contains(":"))
+        .and_then(|timestamp| NaiveDateTime::parse_from_str(timestamp.trim_matches('"'), "%Y-%m-%d %H:%M:%S").ok())
+}
+
+
 pub async fn get_table_at_timestamp(
     state: web::Data<AppState>,
     table_name: &String,
@@ -525,8 +617,6 @@ pub async fn get_table_at_timestamp(
 ) -> Result<Vec<Vec<String>>> {
     let initial_table_name = format!("{}_initial", table_name);
     let updates_table_name = format!("{}_updates", table_name);
-
-    debug!("timestamp: {}", timestamp);
 
     // Parse the provided timestamp to a `NaiveDateTime`.
     let target_timestamp = NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S")
@@ -589,10 +679,6 @@ fn row_timestamp_is_before(row: &Vec<String>, target_timestamp: &NaiveDateTime) 
         match NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d %H:%M:%S") {
             Ok(row_timestamp) => row_timestamp <= *target_timestamp, // Compare timestamps
             Err(e) => {
-                debug!(
-                    "Failed to parse timestamp '{}' in row. Error: {}",
-                    timestamp_str, e
-                );
                 false // If timestamp parsing fails, exclude the row
             }
         }
@@ -626,13 +712,11 @@ pub async fn get_column_values(
     // Iterate and extract values for the specified column if it exists, or handle missing column case
     for row in table_data {
         // Skip rows with the specified UUID if `row_uuid` is provided
-        debug!("row_uuid: '{:?}' , uuid inded: '{:?}'", row_uuid, uuid_index);
         if let (Some(uuid_index), Some(row_uuid)) = (uuid_index, row_uuid) {
             // Get and clean the UUID from the row
             if let Some(uuid_raw) = row.get(uuid_index) {
                 let cleaned_uuid = uuid_raw.trim_matches('"');
                 let cleaned_row_uuid = row_uuid.trim_matches('"');
-                debug!("Comparing cleaned_uuid = {:?}, cleaned_row_uuid = {:?}",cleaned_uuid, cleaned_row_uuid);
                 // Compare the cleaned versions
                 if cleaned_uuid == cleaned_row_uuid {
                     continue;

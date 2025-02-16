@@ -295,8 +295,6 @@ pub fn get_column_names_from_schema(
     table_name: &String,
 ) -> Result<Vec<String>> {
     let schema = state.schema.lock().unwrap();
-    debug!("Getting column names from schema for table: {}", table_name);
-
     // Try getting the table directly. If not found, try _initial
     let table = match schema.tables.get(table_name) {
         Some(table) => {Some(table)},
@@ -309,13 +307,10 @@ pub fn get_column_names_from_schema(
     match table {
         Some(table) => {
             let column_names = table.columns.iter().map(|col| col.name.clone()).collect();
-            debug!("Column names for table {}: {:?}", table_name, column_names);
             Ok(column_names)
         },
         None => {
             let not_found_msg = format!("Table '{}' or '{}_initial' not found", table_name, table_name);
-            debug!("{}", not_found_msg);
-
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 not_found_msg,

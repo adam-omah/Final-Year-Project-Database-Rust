@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use crate::query::parser::{sql_parser, ASTNode, Expression, Identifier};
-use crate::records::table::{create_table, delete_row, get_table_at_timestamp, get_table_data, insert_row, load_table_data_from_file, recalculate_current, update_row};
+use crate::records::table::{create_table, delete_row, get_table_at_timestamp, get_table_data, insert_row, load_table_data_from_file, recalculate_table, update_row};
 use crate::schema::schema;
 use crate::schema::schema::{get_column_names_from_schema};
 use crate::{AppState};
@@ -27,7 +27,6 @@ pub async fn execute_query(
             break; // Extract only the first WHERE clause
         }
     }
-    debug!("WHERE clause: {:?}", where_clause);
     for (i, ast_node) in ast_nodes.iter().enumerate() {
         match ast_node {
             ASTNode::Select { columns, table, timestamp } => {
@@ -306,7 +305,7 @@ async fn handle_update(
                     }
                 }
 
-                if let Err(e) = recalculate_current(data, table_name, initial_data).await {
+                if let Err(e) = recalculate_table(data, table_name, initial_data).await {
                     return HttpResponse::InternalServerError()
                         .body(format!("Error recalculating data: {}", e));
                 }

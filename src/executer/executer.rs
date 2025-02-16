@@ -9,7 +9,6 @@ use actix_web::{post, web, HttpRequest, HttpResponse};
 use tracing::log::{debug, info};
 use uuid::Uuid;
 use regex::Regex;
-use crate::query::parser;
 use crate::records::table::extract_literal_value;
 
 pub async fn execute_query(
@@ -27,7 +26,7 @@ pub async fn execute_query(
             break; // Extract only the first WHERE clause
         }
     }
-    for (i, ast_node) in ast_nodes.iter().enumerate() {
+    for (.., ast_node) in ast_nodes.iter().enumerate() {
         match ast_node {
             ASTNode::Select { columns, table, timestamp } => {
                 return handle_select(columns, table, timestamp, &data, where_clause.clone()).await;

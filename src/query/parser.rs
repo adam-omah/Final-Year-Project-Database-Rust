@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::str;
 use tracing::log::debug;
 use uuid::Uuid;
+use crate::schema::schema::DataType;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug, Hash)]
 pub enum Identifier {
@@ -14,25 +15,6 @@ pub enum Identifier {
     // Represents * in SELECT statements.
     Star,
 }
-
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug, Hash)]
-pub enum DataType { //Make sure this exists here too
-    Int,
-    String,
-    UUID,
-}
-
-impl From<&str> for DataType {
-    fn from(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "int" | "integer" => DataType::Int,
-            "string" | "text" | "varchar" => DataType::String,  // Handle common string type names
-            "uuid" => DataType::UUID,
-            _ => panic!("Unsupported data type: {}", s), // Or handle with a Result
-        }
-    }
-}
-
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Expression {
@@ -221,9 +203,9 @@ fn parse_select_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
     }
 }
 
-fn normalize_timestamp(input: &str) -> String {
-    input.replace("%20", " ").replace("T", " ")
-}
+// fn normalize_timestamp(input: &str) -> String {
+//     input.replace("%20", " ").replace("T", " ")
+// }
 
 
 fn parse_where_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
@@ -274,11 +256,37 @@ fn parse_create_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
                             && tokens[*index + 1] != ")"
                         {
                             *index += 1;
-                            constraints.push(tokens[*index].clone());
+                            if tokens[*index].to_uppercase() == "CHECK" && *index + 1 < tokens.len() {
+                                *index += 1;
+                                // Ensure the next token is the opening parenthesis
+                                if tokens[*index] == "(" {
+                                    *index += 1;
+                                    if *index + 3 < tokens.len() {
+                                        // Parse the expression (identifier operator value)
+                                        let identifier = tokens[*index].clone(); // Column name or identifier
+                                        *index += 1;
+                                        let operator = tokens[*index].clone(); // Operator (e.g., >, <, =, etc.)
+                                        *index += 1;
+                                        let value = tokens[*index].clone(); // Right-hand side value
+                                        *index += 1;
+
+                                        // Ensure the next token is the closing parenthesis
+                                        if tokens[*index] == ")" {
+                                            constraints.push(format!("CHECK ({} {} {})", identifier, operator, value)); // Store the parsed expression
+                                        } else {
+                                            return Err("Invalid syntax for CHECK constraint: Missing ')'".into());
+                                        }
+                                    } else {
+                                        return Err("Invalid syntax for CHECK constraint: Incomplete expression".into());
+                                    }
+                                } else {
+                                    return Err("Invalid syntax for CHECK constraint: Missing '('".into());
+                                }
+                            } else {
+                                constraints.push(tokens[*index].clone());
+                            }
                         }
-
                         columns.push((column_name, column_type, constraints)); // Updated
-
                         *index += 1;
                         if *index < tokens.len() && tokens[*index] == "," {
                             *index += 1; // Skip comma

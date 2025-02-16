@@ -4,12 +4,11 @@ use crate::schema::{schema::create_table as schema_create_table, schema::Table};
 use crate::AppState;
 use actix_web::{get, web, HttpResponse, Responder};
 use std::fs::{OpenOptions};
-use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Seek, Write};
+use std::io::{Error, ErrorKind, Read, Result, Seek, Write};
 use std::path::Path;
 use crate::query::parser::Identifier;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
-use actix_web::web::Data;
 use tracing::log::debug;
 use crate::schema::schema::{check_column_rules, is_valid_data_type, DataType};
 use chrono::{NaiveDateTime, Utc};
@@ -177,7 +176,6 @@ pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<Ap
     let mut deleted_row = vec![];
     let trimmed_uuid = uuid.trim_matches('"');
     for column in &table.columns {
-        let column_name = column.name.to_lowercase();
         match column.data_type {
             DataType::UUID => {
                 // Add the trimmed UUID
@@ -439,7 +437,7 @@ pub async fn recalculate_row(
     table_name: &str,
     uuid: &str,
 ) -> Result<()> {
-    let mut cache = state.cache.lock().unwrap();
+    let cache = state.cache.lock().unwrap();
 
     // Check if the table is in the cache
     if !cache.contains_key(table_name) {
@@ -543,9 +541,10 @@ pub async fn recalculate_table(
     // Sort updates in descending order of timestamp to ensure the most recent updates are applied
     let mut sorted_updates_data = updates_data.clone();
     sorted_updates_data.sort_by(|a, b| {
-        let a_timestamp = parse_timestamp_from_row(a);
-        let b_timestamp = parse_timestamp_from_row(b);
-
+        let a_timestamp = a.iter().find(|col| col.contains("-") && col.contains(":"))
+            .and_then(|timestamp| NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S").ok());
+        let b_timestamp = b.iter().find(|col| col.contains("-") && col.contains(":"))
+            .and_then(|timestamp| NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S").ok());
         b_timestamp.cmp(&a_timestamp)
     });
     // Merge the initial data with sorted updates
@@ -678,7 +677,7 @@ fn row_timestamp_is_before(row: &Vec<String>, target_timestamp: &NaiveDateTime) 
         let timestamp_str = timestamp_str.trim_matches('"'); // Strip quotes if present
         match NaiveDateTime::parse_from_str(timestamp_str, "%Y-%m-%d %H:%M:%S") {
             Ok(row_timestamp) => row_timestamp <= *target_timestamp, // Compare timestamps
-            Err(e) => {
+            Err(..) => {
                 false // If timestamp parsing fails, exclude the row
             }
         }

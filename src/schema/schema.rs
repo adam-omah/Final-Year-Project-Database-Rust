@@ -9,8 +9,10 @@ use tracing::log::debug;
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
 use chrono::NaiveDateTime;
-use crate::query::parser::Expression;
-use crate::records::table::{get_column_values, get_table_data};
+use regex::Regex;
+use crate::executer::executer::evaluate_where_clause;
+use crate::query::parser::{Expression, Identifier};
+use crate::records::table::{get_column_values};
 
 // Data types for columns.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
@@ -34,13 +36,11 @@ impl From<&str> for DataType {
 }
 
 
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstraintType {
     Unique,
     NotNull,
     Check(Expression), // Expression is from your parser
-    // ... other types
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -85,25 +85,7 @@ pub fn map_string_to_rule(rule_str: &str) -> Option<Rule> {
     }
 
     let constraint_str = parts[0].to_lowercase();
-
-    // Extract the action, defaulting to Reject
-    let action = if parts.len() > 1 {
-        match parts[1].to_lowercase().as_str() {
-            "set" => {
-                if parts.len() > 3 && parts[2].to_lowercase() == "null" {
-                    Some(RuleAction::SetNull)
-                } else if parts.len() > 3 && parts[2].to_lowercase() == "default" {
-                    Some(RuleAction::SetDefault(parts[3..].join(" ")))
-                } else {
-                    None
-                }
-            }
-            "reject" => Some(RuleAction::Reject),
-            _ => None,
-        }
-    } else {
-        None
-    };
+    let action = None; // CHECK constraints do not support actions directly
 
     let constraint_type = match constraint_str.as_str() {
         "not" => {
@@ -114,20 +96,67 @@ pub fn map_string_to_rule(rule_str: &str) -> Option<Rule> {
             }
         }
         "unique" => Some(ConstraintType::Unique),
+        "check" => {
+            // Assume the CHECK expression starts after 'CHECK' keyword
+            let expr_str = parts[1..].join(" ");
+            if expr_str.trim().starts_with('(') && expr_str.trim().ends_with(')') {
+                let inner_expr = &expr_str[1..expr_str.len() - 1];
+                // Attempt to parse inner_expr into a valid Expression
+                // (You'll need to implement this parsing function)
+                let expression = parse_expression(inner_expr);
+                expression.map(ConstraintType::Check)
+            } else {
+                None
+            }
+        }
         _ => None,
     };
 
-    match (constraint_type, action) {
-        (Some(c_type), Some(action)) => Some(Rule {
+    match constraint_type {
+        Some(c_type) => Some(Rule {
             constraint_type: c_type,
-            action,
+            action: action.unwrap_or(RuleAction::Reject), // Default to Reject as fallback
         }),
-        (Some(c_type), None) => Some(Rule {
-            constraint_type: c_type,
-            action: RuleAction::Reject, // Default action
-        }),
-        _ => None,
+        None => None, // Constraint type not recognized
     }
+}
+
+// Helper function to parse a CHECK constraint into an `Expression`
+fn parse_expression(expr_str: &str) -> Option<Expression> {
+    // Regex to match expressions like "age > 18" or "name = 'John'"
+    let re = Regex::new(r#"(?i)^\s*([\w\.]+)\s*(=|!=|>|>=|<|<=|LIKE)\s*(['"]?[\w\.]+['"]?)\s*$"#).ok()?;
+
+    // Check if expression matches the regex pattern
+    let captures = re.captures(expr_str)?;
+
+    // Extract the captured groups for left operand, operator, and right operand
+    let left = captures.get(1)?.as_str().to_string();
+    let operator = captures.get(2)?.as_str().to_string();
+    let right = captures.get(3)?.as_str().to_string();
+
+    // Determine the type of the left operand
+    let left_identifier = if left.starts_with('"') || left.starts_with('\'') {
+        Identifier::Literal(left.trim_matches(|c| c == '"' || c == '\'').to_string(), Option::from(DataType::String))
+    } else {
+        Identifier::Name(left)
+    };
+
+
+    // Determine the type of the right operand
+    let right_identifier = if right.starts_with('"') || right.starts_with('\'') {
+        Identifier::Literal(right.trim_matches(|c| c == '"' || c == '\'').to_string(), Option::from(DataType::String))
+    } else if right.parse::<i64>().is_ok() {
+        Identifier::Literal(right, Option::from(DataType::Int))
+    } else {
+        Identifier::Name(right)
+    };
+
+    // Construct an `Expression::Comparison` and return it
+    Some(Expression::Comparison {
+        left: left_identifier,
+        operator,
+        right: right_identifier,
+    })
 }
 
 
@@ -264,10 +293,26 @@ pub async fn check_column_rules(
                 }
             },
             ConstraintType::Check(expression) => {
-                // Here you would evaluate your 'expression' against 'value'
-                // and update 'final_value' according to the Check constraint
-                // and the specified 'action'. This will require code from your
-                // parser to evaluate the expression.
+                let column_names = vec![column.name.clone()]; // Current column
+                let row = vec![value.to_string()]; // Treat the value as a "row" for evaluation
+
+                let is_valid = evaluate_where_clause(expression, &row, &column_names);
+
+                if !is_valid {
+                    match &rule.action {
+                        RuleAction::SetNull => final_value = None,
+                        RuleAction::SetDefault(default_value) => final_value = Some(default_value.clone()),
+                        RuleAction::Reject => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!(
+                                    "Check constraint violated for column '{}'. Expression {:?} does not hold.",
+                                    column.name, expression
+                                ),
+                            ));
+                        }
+                    }
+                }
             }
             // Handle other rule types as needed
         }

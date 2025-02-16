@@ -5,6 +5,25 @@
 
 An abstract syntax tree (AST) is a data structure used in computer science to represent the structure of a program or code snippet.
 
+## Create Table
+
+## Gets
+
+## Inserts
+
+## Updates
+
+## Deletion
+
+Rows sent to delete call such as 
+
+``
+DELETE FROM test_table WHERE uuid = \"ec32b2da-6344-4d85-83bf-a831d69f3f40\"
+``
+
+Will set all Int values to 0 , timestamps to time of deletion, all String values to ROW_REMOVED.
+
+
 ### Docker Commands
 Build Command:
 ``

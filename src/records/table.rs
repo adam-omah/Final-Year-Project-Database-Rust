@@ -9,8 +9,9 @@ use std::path::Path;
 use crate::query::parser::Identifier;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
+use actix_web::web::Data;
 use tracing::log::debug;
-use crate::schema::schema::{check_column_rules, is_valid_data_type};
+use crate::schema::schema::{check_column_rules, is_valid_data_type, DataType};
 use chrono::{NaiveDateTime, Utc};
 
 
@@ -161,8 +162,75 @@ pub async fn update_row(
 }
 
 
+pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<AppState>) -> Result<()> {
+    debug!("Processing delete_row for table: {}, uuid: {}", table_name, uuid);
 
+    // Construct the `_updates` table name and path
+    let updates_table_name = format!("{}_updates", table_name);
+    let updates_table_path = Path::new(&state.config.db_dir)
+        .join(&state.config.table_dir)
+        .join(&updates_table_name);
 
+    // Load the schema for the table
+    let schema = state.schema.lock().unwrap().clone();
+    let initial_table_name = format!("{}_initial", table_name);
+    let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
+        Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Table '{}' does not exist in schema", initial_table_name),
+        )
+    })?;
+
+    // Construct a "deleted" row for the `_updates` file
+    let mut deleted_row = vec![];
+    let trimmed_uuid = uuid.trim_matches('"');
+    for column in &table.columns {
+        let column_name = column.name.to_lowercase();
+        match column.data_type {
+            DataType::UUID => {
+                // Add the trimmed UUID
+                deleted_row.push(trimmed_uuid.to_string());
+            }
+            DataType::DateTime => {
+                // Add the current timestamp
+                deleted_row.push(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string());
+            }
+            DataType::Int => {
+                // For numeric (Int) columns, set value to `0`
+                deleted_row.push("0".to_string());
+            }
+            _ => {
+                // For all other columns (String, etc.), use "Deleted"
+                deleted_row.push("ROW_REMOVED".to_string());
+            }
+        }
+    }
+
+    // Serialize the row for writing
+    let serialized_row = deleted_row
+        .iter()
+        .map(|value| quote_if_needed(value))
+        .collect::<Vec<String>>()
+        .join(",");
+
+    // Append the "deleted" row to the `_updates` table
+    let mut writer = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&updates_table_path)?;
+    write_newline_if_needed(&updates_table_path)?;
+    writeln!(writer, "{}", serialized_row)?;
+
+    // Recalculate the cache by merging `_initial` and `_updates`
+    let initial_data = load_table_data_from_file(
+        &Path::new(state.config.db_dir.as_path())
+            .join(state.config.table_dir.as_path())
+            .join(&initial_table_name),
+    )?;
+    recalculate_current(state, table_name, initial_data).await?;
+
+    Ok(())
+}
 
 
 // Utility function for extracting data from `_initial` and `_updates` tables, applying updates, and returning combined data.
@@ -332,9 +400,6 @@ fn quote_if_needed(value: &str) -> String {
     }else {
         return format!("\"{}\"", value.replace('\"', "\\\"")); // Escape quotes within the value
     }
-
-    // Return the value as-is if no quotes are needed
-    // value.to_string()
 }
 
 

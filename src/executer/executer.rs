@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use crate::query::parser::{sql_parser, ASTNode, Expression, Identifier};
-use crate::records::table::{create_table, get_table_at_timestamp, get_table_data, insert_row, load_table_data_from_file, recalculate_current, update_row};
+use crate::records::table::{create_table, delete_row, get_table_at_timestamp, get_table_data, insert_row, load_table_data_from_file, recalculate_current, update_row};
 use crate::schema::schema;
 use crate::schema::schema::{get_column_names_from_schema};
 use crate::{AppState};
@@ -41,6 +41,9 @@ pub async fn execute_query(
             }
             ASTNode::Update { table, values } => {
                 return handle_update(table, values, &data, &where_clause).await;
+            }
+            ASTNode::Delete { table } => {
+                return handle_delete(table, &data, &where_clause).await;
             }
             _ => {
                 return HttpResponse::BadRequest().body("Unsupported AST Node type");
@@ -191,6 +194,59 @@ async fn handle_insert(
         HttpResponse::BadRequest().body("Invalid table name in INSERT statement")
     }
 }
+
+async fn handle_delete(
+    table: &Identifier,
+    data: &web::Data<AppState>,
+    where_clause: &Option<Expression>,
+) -> HttpResponse {
+    if let Identifier::Name(table_name) = table {
+        // Ensure a WHERE clause is provided
+        if where_clause.is_none() {
+            return HttpResponse::BadRequest().body("DELETE must include a WHERE clause with a valid filter");
+        }
+
+        let condition = where_clause.as_ref().unwrap();
+
+        // Load table data to identify rows to delete
+        let initial_table_name = format!("{}_initial", table_name);
+        let initial_table_path = Path::new(&data.config.db_dir)
+            .join(&data.config.table_dir)
+            .join(&initial_table_name);
+
+        match load_table_data_from_file(&initial_table_path) {
+            Ok(initial_data) => {
+                let column_names = get_column_names_from_schema(data, table_name).unwrap_or_default();
+
+                // Filter rows based on the WHERE clause
+                let rows_to_delete: Vec<_> = initial_data
+                    .iter()
+                    .filter(|row| evaluate_where_clause(condition, row, &column_names))
+                    .collect();
+
+                if rows_to_delete.is_empty() {
+                    return HttpResponse::NotFound().body("No rows matched the specified condition");
+                }
+
+                // Call `delete_row` for each filtered row
+                for row in &rows_to_delete {
+                    if let Some(row_id) = row.get(0) {
+                        if let Err(e) = delete_row(table_name, row_id, data).await {
+                            return HttpResponse::InternalServerError().body(format!("Error deleting row: {}", e));
+                        }
+                    }
+                }
+
+                HttpResponse::Ok().body(format!("Deleted {} rows", rows_to_delete.len()))
+            }
+            Err(e) => HttpResponse::InternalServerError().body(format!("Error loading initial data: {}", e)),
+        }
+    } else {
+        HttpResponse::BadRequest().body("Invalid table name in DELETE statement")
+    }
+}
+
+
 
 async fn handle_update(
     table: &Identifier,

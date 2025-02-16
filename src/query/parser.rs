@@ -94,6 +94,9 @@ pub fn sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
             "UPDATE" => {
                 ast_nodes.push(parse_update_clause(&mut tokens, &mut index)?);
             }
+            "DELETE" => {
+                ast_nodes.push(parse_delete_clause(&mut tokens, &mut index)?);
+            }
             _ => {
                 return Err(format!("Unexpected token: {}", tokens[index]));
             }
@@ -301,6 +304,28 @@ fn parse_create_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
     }
 }
 
+fn parse_delete_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
+    *index += 1; // Move past "DELETE"
+    if *index < tokens.len() && tokens[*index] == "FROM" {
+        *index += 1; // Move past "FROM"
+        if *index < tokens.len() {
+            let table = Identifier::Name(tokens[*index].to_string());
+            *index += 1;
+
+            if *index < tokens.len() && tokens[*index] == "WHERE" {
+                Ok(ASTNode::Delete { table })
+            } else {
+                // Return an error if there is no WHERE clause
+                return Err("DELETE statement must include a WHERE clause".to_string());
+            }
+        } else {
+            return Err("Expected table name after DELETE FROM".to_string());
+        }
+    } else {
+        return Err("Expected FROM after DELETE".to_string());
+    }
+}
+
 
 
 fn parse_insert_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
@@ -439,23 +464,7 @@ mod tests {
 
     #[test]
     fn test_basic_comparison() {
-        // let query = b"SELECT id FROM my_table WHERE id = 1";
-        // let ast = sql_parser(query).unwrap();
-        //
-        // assert_eq!(
-        //     ast,
-        //     vec![
-        //         ASTNode::Select { columns: vec![Identifier::Name("id".to_string())] },
-        //         ASTNode::From { table: Identifier::Name("my_table".to_string()) },
-        //         ASTNode::Where {
-        //             condition: Expression::Comparison {
-        //                 left: Identifier::Name("id".to_string()),
-        //                 operator: "=".to_string(),
-        //                 right: Identifier::Literal("1".to_string(), None)
-        //             }
-        //         },
-        //     ]
-        // );
+        // fill in
     }
     #[test]
     fn test_select_with_timestamp() {
@@ -486,25 +495,6 @@ mod tests {
             }]
         );
     }
-
-    // #[test]
-    // fn test_create_table_custom() {
-    //     let query = b"CREATE TABLE test_table (col1 Int, col2 String)";
-    //     let ast = sql_parser(query).unwrap();
-    //
-    //     assert_eq!(
-    //         ast,
-    //         vec![
-    //             ASTNode::Create {
-    //                 table: Identifier::Name("test_table".to_string()),
-    //                 columns: vec![
-    //                     (Identifier::Name("col1".to_string()), Identifier::Name("Int".to_string())),
-    //                     (Identifier::Name("col2".to_string()), Identifier::Name("String".to_string()))
-    //                 ]
-    //             }
-    //         ]
-    //     );
-    // }
 
     #[test]
     fn test_invalid_create_table_missing_paren() {

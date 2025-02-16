@@ -75,7 +75,7 @@ pub async fn insert_row(
 // Append updates to the `_updates` table.
 pub async fn update_row(
     table_name: &str,
-    uuid: &str,
+    uuid: &String,
     mut updated_values: HashMap<String, String>,
     state: &web::Data<AppState>,
 ) -> Result<()> {
@@ -84,51 +84,82 @@ pub async fn update_row(
         .join(state.config.table_dir.as_path())
         .join(&updates_table_name);
 
-    // Add UUID to updated_values *before* validation
-    updated_values.insert("UUID".to_string(), uuid.to_string());
+    // Acquire the schema and table layout information
+    let schema = state.schema.lock().unwrap().clone();
+    let initial_table_name = format!("{}_initial", table_name);
+    let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Table '{}' does not exist in schema", initial_table_name),
+        )
+    })?;
 
-    let validated_row = validate_and_process_row(table_name, updated_values, state).await?;
+    // Check if UUID exists in the current table state
+    let current_data = get_table_data(state.clone(), table_name).await?;
+    let row_index = current_data
+        .iter()
+        .position(|row| row.get(0) == Some(uuid)) // Assume UUID is always in the first column
+        .ok_or_else(|| {
+            std::io::Error::new(ErrorKind::NotFound, format!("Row with UUID '{}' not found", uuid))
+        })?;
 
-    // Get the index of the "UUID" column
-    let uuid_index = state.schema.lock().unwrap().tables.get(&format!("{}_initial", table_name))
-        .and_then(|table| table.columns.iter().position(|col| col.name == "UUID"));
+    // Merge existing row data with updated values
+    let current_row = &current_data[row_index].iter()
+        .map(|value| {
+            if value.starts_with('"') && value.ends_with('"') {
+                value.trim_start_matches('"').trim_end_matches('"').to_string()
+            } else {
+                value.clone()
+            }
+        })
+        .collect::<Vec<String>>();
+    debug!("Current row data: {:#?}", current_row);
+    let mut merged_row = HashMap::new();
 
-    // Serialize the row, conditionally quoting values
+    for (index, column) in table.columns.iter().enumerate() {
+        let column_name = &column.name.to_lowercase();
+        if column_name == "timestamp" || column_name == "uuid" {
+            continue;
+        }
+        // Use the updated value if provided; otherwise, use the existing value from the current row
+        let value = updated_values
+            .remove(column_name)
+            .unwrap_or_else(|| current_row[index].clone());
+        merged_row.insert(column_name.clone(), value);
+    }
+
+    // Add UUID to merged_row for validation
+    merged_row.insert("UUID".to_string(), uuid.trim_matches('"').to_string());
+
+    // Validate the merged row
+    let validated_row = validate_and_process_row(table_name, merged_row, state).await?;
+
+    // Serialize the validated row
     let serialized_row = validated_row
         .iter()
-        .enumerate()
-        .map(|(i, val)| {
-            if let Some(uuid_idx) = uuid_index {
-                if i == uuid_idx {
-                    return val.to_string();
-                }
-            }
-            quote_if_needed(val)
-        })
+        .map(|value| quote_if_needed(value))
         .collect::<Vec<String>>()
         .join(",");
 
-
+    // Write the updated row to the `_updates` table
     let mut writer = OpenOptions::new()
         .create(true)
         .append(true)
         .open(&updates_table_path)?;
-
     write_newline_if_needed(&updates_table_path)?;
-
     writeln!(writer, "{}", serialized_row)?;
 
-    // Recalculate the current state after an update
-    let initial_table_name = format!("{}_initial", table_name);
-    let initial_table_path = Path::new(state.config.db_dir.as_path())
-        .join(state.config.table_dir.as_path())
-        .join(&initial_table_name);
-
-    let initial_data = load_table_data_from_file(&initial_table_path)?;
+    // Recalculate the cache to reflect the updated state
+    let initial_data = load_table_data_from_file(
+        &Path::new(state.config.db_dir.as_path())
+            .join(state.config.table_dir.as_path())
+            .join(&initial_table_name),
+    )?;
     recalculate_current(state, table_name, initial_data).await?;
 
     Ok(())
 }
+
 
 
 
@@ -211,6 +242,17 @@ async fn validate_and_process_row(
         )
     })?;
 
+    // Extract the UUID from the row_data, which is assumed to be the first column
+    let row_uuid = row_data
+        .get("UUID")
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Missing UUID column in row data",
+            )
+        })?
+        .to_owned();
+
     // Validate row data based on the schema's column constraints
     let mut validated_row = Vec::new();
     for column in &table.columns {
@@ -243,15 +285,13 @@ async fn validate_and_process_row(
         }
 
         // Validate and transform the value based on column rules
-        let validated_value = check_column_rules(column, &value, table_name, &state)
-            .await // Await the future
-            .and_then(|validated| {  // Now you can use and_then
-                validated.ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("Constraint violation for column '{}'", column_name),
-                    )
-                })
+        let validated_value = check_column_rules(column, &value, table_name, &state, Some(&row_uuid))
+            .await?
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Constraint violation for column '{}'", column_name),
+                )
             })?;
 
         validated_row.push(validated_value);
@@ -496,9 +536,13 @@ fn row_timestamp_is_before(row: &Vec<String>, target_timestamp: &NaiveDateTime) 
     }
 }
 
-pub async fn get_column_values(table_name: &str, column_name: &str, state: &web::Data<AppState>) -> Result<HashSet<String>> {
-    let table_data = get_table_data(state.clone(), table_name).await?; // Get the full table data
-
+pub async fn get_column_values(
+    table_name: &str,
+    column_name: &str,
+    state: &web::Data<AppState>,
+    row_uuid: Option<&str>,
+) -> Result<HashSet<String>> {
+    let table_data = get_table_data(state.clone(), table_name).await?;
     let schema = state.schema.lock().unwrap();
     let initial_table_name = format!("{}_initial", table_name);
     let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
@@ -507,20 +551,39 @@ pub async fn get_column_values(table_name: &str, column_name: &str, state: &web:
             format!("Table '{}' not found in schema", initial_table_name),
         )
     })?;
+
     // Find the index of the specified column, handling case where the column is not present
     let column_index = table.columns.iter().position(|col| col.name == column_name);
+    let uuid_index = table.columns.iter().position(|col| col.name.to_lowercase() == "uuid");
+
 
     let mut values = HashSet::new();
     // Iterate and extract values for the specified column if it exists, or handle missing column case
     for row in table_data {
-        if let Some(index) = column_index {
-            if let Some(value) = row.get(index) {
-                values.insert(value.trim_matches('"').to_string());
+        // Skip rows with the specified UUID if `row_uuid` is provided
+        debug!("row_uuid: '{:?}' , uuid inded: '{:?}'", row_uuid, uuid_index);
+        if let (Some(uuid_index), Some(row_uuid)) = (uuid_index, row_uuid) {
+            // Get and clean the UUID from the row
+            if let Some(uuid_raw) = row.get(uuid_index) {
+                let cleaned_uuid = uuid_raw.trim_matches('"');
+                let cleaned_row_uuid = row_uuid.trim_matches('"');
+                debug!("Comparing cleaned_uuid = {:?}, cleaned_row_uuid = {:?}",cleaned_uuid, cleaned_row_uuid);
+                // Compare the cleaned versions
+                if cleaned_uuid == cleaned_row_uuid {
+                    continue;
+                }
             } else {
-                debug!("Row is missing value at index {:?}", index)
+                debug!("No UUID found at index {} in row: {:?}",uuid_index, row);
             }
-        } else {
-            debug!("Column named '{}' not found for table '{}'", column_name, initial_table_name)
+            if let Some(index) = column_index {
+                if let Some(value) = row.get(index) {
+                    values.insert(value.trim_matches('"').to_string());
+                } else {
+                    debug!("Row is missing value at index {:?}", index);
+                }
+            } else {
+                debug!("Column named '{}' not found for table '{}'",column_name, initial_table_name);
+            }
         }
     }
     Ok(values)

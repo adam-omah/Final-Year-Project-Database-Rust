@@ -10,7 +10,7 @@ use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
 use chrono::NaiveDateTime;
 use crate::query::parser::Expression;
-use crate::records::table::get_column_values;
+use crate::records::table::{get_column_values, get_table_data};
 
 // Data types for columns.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
@@ -223,7 +223,12 @@ pub fn create_table(schema: &mut Schema, table: Table, config: &DatabaseConfig) 
 
 
 
-pub async fn check_column_rules(column: &Column, value: &str, table_name: &str,  state: &web::Data<AppState>) -> Result<Option<String>> {
+pub async fn check_column_rules(
+    column: &Column,
+    value: &str, table_name: &str,
+    state: &web::Data<AppState>,
+    row_uuid: Option<&str>
+) -> Result<Option<String>> {
 
     let mut final_value = Some(value.to_string()); // Start with the original value
 
@@ -244,18 +249,16 @@ pub async fn check_column_rules(column: &Column, value: &str, table_name: &str, 
                 }
             }
             ConstraintType::Unique => {
-                if !table_name.ends_with("_updates") { // Skip unique check for _updates table
-                    let existing_values = get_column_values(table_name, &column.name, state).await?;
-                    if existing_values.contains(value) {
-                        match &rule.action {
-                            RuleAction::SetNull => final_value = None,
-                            RuleAction::SetDefault(default_value) => final_value = Some(default_value.clone()),
-                            RuleAction::Reject => {
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!("Unique constraint violated for column '{}', Value '{}' already exists in table.", column.name, value),
-                                ));
-                            }
+                let existing_values = get_column_values(table_name, &column.name, state, row_uuid).await?;
+                if existing_values.contains(value) {
+                    match &rule.action {
+                        RuleAction::SetNull => final_value = None,
+                        RuleAction::SetDefault(default_value) => final_value = Some(default_value.clone()),
+                        RuleAction::Reject => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("Unique constraint violated for column '{}', Value '{}' already exists in table.", column.name, value),
+                            ));
                         }
                     }
                 }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::str;
 use tracing::log::debug;
 use uuid::Uuid;
-use crate::schema::schema::DataType;
+use crate::schema::schema::{DataType};
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug, Hash)]
 pub enum Identifier {
@@ -50,6 +50,21 @@ pub struct ASTNodes(pub Vec<ASTNode>);
 
 fn is_uuid(s: &str) -> bool {
     Uuid::parse_str(s).is_ok()
+}
+pub fn is_numeric_literal(s: &str) -> bool {
+    s.parse::<i64>().is_ok() || s.parse::<f64>().is_ok()
+}
+
+
+pub fn is_datetime(s: &str) -> bool {
+    // Try parsing common datetime formats
+    if let Ok(_) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return true; // Example: "2025-02-16 20:10:00"
+    }
+    if let Ok(_) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return true; // Example: "2025-02-16T20:10:00"
+    }
+    false // Return false if format not matched
 }
 
 
@@ -157,7 +172,11 @@ fn parse_select_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
     while *index < tokens.len() && tokens[*index] != "FROM" {
         let identifier = if tokens[*index] == "*" {
             Identifier::Star
-        } else {
+        } else if tokens[*index] == "," {
+            *index += 1;
+            continue
+        }
+        else {
             Identifier::Name(tokens[*index].to_string())
         };
         columns.push(identifier);
@@ -232,7 +251,6 @@ fn parse_where_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AST
 
 fn parse_create_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
     *index += 1; // Move past "CREATE"
-
     if *index < tokens.len() && tokens[*index] == "TABLE" {
         *index += 1;
         if *index < tokens.len() {
@@ -241,74 +259,83 @@ fn parse_create_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
             if *index < tokens.len() && tokens[*index] == "(" {
                 *index += 1;
                 let mut columns = Vec::new();
-
                 while *index < tokens.len() && tokens[*index] != ")" {
+                    // Parse column name
+                    if *index >= tokens.len() {
+                        return Err("Invalid column definition: Missing column name.".into());
+                    }
                     let column_name = Identifier::Name(tokens[*index].clone());
                     *index += 1;
-
-                    if *index < tokens.len() {
-                        let column_type_str = tokens[*index].clone();
-                        let column_type = Identifier::Name(column_type_str.clone());
-
-                        let mut constraints = Vec::new();
-                        while *index + 1 < tokens.len()
-                            && tokens[*index + 1] != ","
-                            && tokens[*index + 1] != ")"
-                        {
+                    // Parse column type
+                    if *index >= tokens.len() || tokens[*index] == "," || tokens[*index] == ")" {
+                        return Err(format!(
+                            "Invalid column definition for '{}': Missing data type.",
+                            match &column_name {
+                                Identifier::Name(name) => name,
+                                _ => "unknown",
+                            }
+                        ));
+                    }
+                    let column_type_str = tokens[*index].clone();
+                    let column_type = Identifier::Name(column_type_str.clone());
+                    *index += 1;
+                    // Parse optional constraints
+                    let mut constraints = Vec::new();
+                    while *index < tokens.len() && tokens[*index] != "," && tokens[*index] != ")" {
+                        if tokens[*index].to_uppercase() == "CHECK" && *index + 1 < tokens.len() {
                             *index += 1;
-                            if tokens[*index].to_uppercase() == "CHECK" && *index + 1 < tokens.len() {
+                            // Parse CHECK constraint
+                            if tokens[*index] == "(" {
                                 *index += 1;
-                                // Ensure the next token is the opening parenthesis
-                                if tokens[*index] == "(" {
+                                if *index + 3 < tokens.len() {
+                                    let identifier = tokens[*index].clone(); // Column name or identifier
                                     *index += 1;
-                                    if *index + 3 < tokens.len() {
-                                        // Parse the expression (identifier operator value)
-                                        let identifier = tokens[*index].clone(); // Column name or identifier
-                                        *index += 1;
-                                        let operator = tokens[*index].clone(); // Operator (e.g., >, <, =, etc.)
-                                        *index += 1;
-                                        let value = tokens[*index].clone(); // Right-hand side value
-                                        *index += 1;
+                                    let operator = tokens[*index].clone(); // Operator (e.g., >, <, =)
+                                    *index += 1;
+                                    let value = tokens[*index].clone(); // Value or constant
+                                    *index += 1;
 
-                                        // Ensure the next token is the closing parenthesis
-                                        if tokens[*index] == ")" {
-                                            constraints.push(format!("CHECK ({} {} {})", identifier, operator, value)); // Store the parsed expression
-                                        } else {
-                                            return Err("Invalid syntax for CHECK constraint: Missing ')'".into());
-                                        }
+                                    if tokens[*index] == ")" {
+                                        constraints.push(format!("CHECK ({} {} {})", identifier, operator, value));
+                                        *index += 1;
                                     } else {
-                                        return Err("Invalid syntax for CHECK constraint: Incomplete expression".into());
+                                        return Err("Invalid CHECK constraint: Missing ')'.".into());
                                     }
                                 } else {
-                                    return Err("Invalid syntax for CHECK constraint: Missing '('".into());
+                                    return Err("Invalid CHECK constraint: Incomplete expression.".into());
                                 }
                             } else {
-                                constraints.push(tokens[*index].clone());
+                                return Err("Invalid CHECK constraint: Missing '('.".into());
                             }
+                        } else {
+                            // Parse other constraints (e.g., UNIQUE or NOT NULL)
+                            constraints.push(tokens[*index].clone());
+                            *index += 1;
                         }
-                        columns.push((column_name, column_type, constraints)); // Updated
+                    }
+                    columns.push((column_name, column_type, constraints));
+
+                    // Skip comma if it's a separator between columns
+                    if *index < tokens.len() && tokens[*index] == "," {
                         *index += 1;
-                        if *index < tokens.len() && tokens[*index] == "," {
-                            *index += 1; // Skip comma
-                        }
-                    } else {
-                        return Err("Invalid column definition: Missing type or constraint".into());
                     }
                 }
+
+                // Ensure the closing parenthesis exists
                 if *index < tokens.len() && tokens[*index] == ")" {
                     *index += 1;
                     return Ok(ASTNode::Create { table, columns });
                 } else {
-                    return Err("Expected ')' after column definitions".into());
+                    return Err("Expected ')' after column definitions.".into());
                 }
             } else {
-                return Err("Expected '(' after table name".into());
+                return Err("Expected '(' after table name.".into());
             }
         } else {
-            return Err("Expected table name after 'CREATE TABLE'".into());
+            return Err("Expected table name after 'CREATE TABLE'.".into());
         }
     } else {
-        return Err("Expected 'TABLE' after 'CREATE'".into());
+        return Err("Expected 'TABLE' after 'CREATE'.".into());
     }
 }
 
@@ -342,6 +369,7 @@ fn parse_insert_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
         *index += 1;
         if *index < tokens.len() {
             let table = Identifier::Name(tokens[*index].to_string());
+            debug!("Table parsed: {:?}", table);
             *index += 1;
 
             let mut columns = Vec::new();
@@ -349,6 +377,7 @@ fn parse_insert_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
                 *index += 1;
                 while *index < tokens.len() && tokens[*index] != ")" {
                     columns.push(Identifier::Name(tokens[*index].to_string()));
+                    debug!("Column parsed: {:?}", tokens[*index]);
                     *index += 1;
                     if *index < tokens.len() && tokens[*index] == "," {
                         *index += 1;
@@ -368,16 +397,33 @@ fn parse_insert_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
                     let mut values = Vec::new();
                     while *index < tokens.len() && tokens[*index] != ")" {
                         let value_token = tokens[*index].clone();
-
-                        let identifier = if is_uuid(&value_token) {
-                            Identifier::Literal(value_token, Some(DataType::UUID))
+                        let identifier = if value_token.starts_with('"') && value_token.ends_with('"') {
+                            // Detect and handle properly quoted strings
+                            Identifier::Literal(
+                                value_token[1..value_token.len() - 1].to_string(), // Strip quotes safely
+                                Some(DataType::String),
+                            )
+                        } else if is_numeric_literal(&value_token) {
+                            // Identify numeric literals (integers or decimals)
+                            Identifier::Literal(value_token, Some(DataType::Int)) // Use DataType::Float if decimals are required
+                        } else if is_uuid(&value_token) {
+                            // Check if the value matches a UUID format
+                            Identifier::Literal(value_token.to_string(), Some(DataType::UUID))
+                        } else if is_datetime(&value_token) {
+                            // Check if the value matches valid datetime formats
+                            Identifier::Literal(value_token.to_string(), Some(DataType::DateTime))
+                        } else if value_token.chars().any(|c| c.is_alphabetic()) {
+                            // Fallback: Contains alphabets, assume string
+                            Identifier::Literal(value_token.to_string(), Some(DataType::String))
                         } else {
+                            // Handle all other cases as unknown literals
                             Identifier::Literal(value_token, None)
                         };
                         values.push(identifier);
                         *index += 1;
+
                         if *index < tokens.len() && tokens[*index] == "," {
-                            *index += 1;
+                            *index += 1; // Skip comma
                         }
                     }
                     if *index < tokens.len() && tokens[*index] == ")" {
@@ -414,52 +460,78 @@ fn parse_update_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
     let table = Identifier::Name(tokens[*index].to_string());
     *index += 1;
 
-    // Parse 'SET' keyword
+    // Parse `SET` keyword
     if *index >= tokens.len() || tokens[*index] != "SET" {
         return Err("Expected 'SET' after table name in 'UPDATE'".to_string());
     }
     *index += 1;
 
-    // Parse key-value pairs in the 'SET' clause
+    // Parse key-value pairs in the `SET` clause
     let mut values = Vec::new();
     while *index < tokens.len() && tokens[*index] != "WHERE" {
-        // Parse the column name
-        if *index >= tokens.len() {
+        // Parse column name
+        let column = if *index < tokens.len() {
+            Identifier::Name(tokens[*index].to_string())
+        } else {
             return Err("Expected column name in 'SET' clause".to_string());
-        }
-        let column = Identifier::Name(tokens[*index].to_string());
+        };
         *index += 1;
 
-        // Parse the assignment operator '='
+        // Parse assignment operator `=`
         if *index >= tokens.len() || tokens[*index] != "=" {
-            return Err("Expected '=' after column name in 'SET' clause".to_string());
+            return Err(format!(
+                "Expected '=' after column name '{}'",
+                match column {
+                    Identifier::Name(ref name) => name.clone(),
+                    _ => String::from("unknown"),
+                }
+            ));
         }
         *index += 1;
 
-        // Parse the value
+        // Parse value
         if *index >= tokens.len() {
             return Err("Expected value after '=' in 'SET' clause".to_string());
         }
         let value_token = tokens[*index].clone();
-        let value = if is_uuid(&value_token) {
-            Identifier::Literal(value_token, Some(DataType::UUID))
+        let indentifier = if value_token.starts_with('"') && value_token.ends_with('"') {
+            // Handle string literals
+            Identifier::Literal(
+                value_token[1..value_token.len() - 1].to_string(),
+                Some(DataType::String),
+            )
+        } else if is_numeric_literal(&value_token) {
+            // Handle numbers
+            Identifier::Literal(value_token, Some(DataType::Int)) // Adjust to `Float` if decimals are needed
+        } else if is_uuid(&value_token) {
+            // Handle UUIDs
+            Identifier::Literal(value_token.to_string(), Some(DataType::UUID))
+        } else if is_datetime(&value_token) {
+            // Handle datetime literals
+            Identifier::Literal(value_token.to_string(), Some(DataType::DateTime))
+        } else if value_token.chars().any(|c| c.is_alphabetic()) {
+            // Fallback: Contains alphabets, assume string
+            Identifier::Literal(value_token.to_string(), Some(DataType::String))
         } else {
+            // Treat anything else as a generic literal
             Identifier::Literal(value_token, None)
         };
-        values.push((column, value));
         *index += 1;
 
-        // Skip commas if multiple key-value pairs
+        // Add the parsed value pair to the set
+        values.push((column, indentifier));
+
+        // Skip commas if multiple assignments
         if *index < tokens.len() && tokens[*index] == "," {
             *index += 1;
         }
     }
 
-    // Enforce the presence of the 'WHERE' clause
+    // Enforce the presence of the "WHERE" clause
     if *index >= tokens.len() || tokens[*index] != "WHERE" {
         return Err("Expected 'WHERE' clause after 'SET' in 'UPDATE'".to_string());
-    }else {
-        Ok(ASTNode::Update { table, values })
+    } else {
+        Ok(ASTNode::Update { table, values }) // Finalize and return the ASTNode::Update
     }
 }
 
@@ -468,12 +540,26 @@ fn parse_update_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
 #[cfg(test)]
 mod tests {
     use crate::query::parser::DataType::String;
+    use crate::schema::schema::DataType::Int;
     use super::*;
 
     #[test]
     fn test_basic_comparison() {
-        // fill in
+        let query = b"WHERE age > 18";
+        let ast = sql_parser(query).unwrap();
+
+        assert_eq!(
+            ast,
+            vec![ASTNode::Where {
+                condition: Expression::Comparison {
+                    left: Identifier::Name("age".to_string()),
+                    operator: ">".to_string(),
+                    right: Identifier::Literal("18".to_string(), None), // Properly parsed as integer
+                }
+            }]
+        );
     }
+
     #[test]
     fn test_select_with_timestamp() {
         let query = b"SELECT * FROM users AT 2025-02-11T20:14:26";
@@ -484,7 +570,44 @@ mod tests {
             vec![ASTNode::Select {
                 columns: vec![Identifier::Star],
                 table: Identifier::Name("users".to_string()),
-                timestamp: Some("2025-02-11T20:14:26".to_string()),
+                timestamp: Some("2025-02-11 20:14:26".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_select_with_multiple_columns_and_alias() {
+        let query = b"SELECT id,name,email FROM users";
+        let ast = sql_parser(query).unwrap();
+
+        assert_eq!(
+            ast,
+            vec![ASTNode::Select {
+                columns: vec![
+                    Identifier::Name("id".to_string()),
+                    Identifier::Name("name".to_string()),
+                    Identifier::Name("email".to_string())
+                ],
+                table: Identifier::Name("users".to_string()),
+                timestamp: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_select_with_star_and_column() {
+        let query = b"SELECT *,email FROM users";
+        let ast = sql_parser(query).unwrap();
+
+        assert_eq!(
+            ast,
+            vec![ASTNode::Select {
+                columns: vec![
+                    Identifier::Star,
+                    Identifier::Name("email".to_string()),
+                ],
+                table: Identifier::Name("users".to_string()),
+                timestamp: None,
             }]
         );
     }
@@ -510,7 +633,7 @@ mod tests {
         let ast = sql_parser(query);
 
         assert!(ast.is_err());
-        assert_eq!(ast.err().unwrap(), "Expected '(' after table name".to_string());
+        assert_eq!(ast.err().unwrap(), "Expected '(' after table name.".to_string());
     }
 
     #[test]
@@ -519,7 +642,7 @@ mod tests {
         let ast = sql_parser(query);
 
         assert!(ast.is_err());
-        assert_eq!(ast.err().unwrap(), "Invalid column definition".to_string());
+        assert_eq!(ast.err().unwrap(), "Invalid column definition for 'id': Missing data type.".to_string());
     }
 
     #[test]
@@ -528,7 +651,32 @@ mod tests {
         let ast = sql_parser(query);
 
         assert!(ast.is_err());
-        assert_eq!(ast.err().unwrap(), "Invalid column definition".to_string());
+        assert_eq!(ast.err().unwrap(), "Invalid column definition for 'id': Missing data type.".to_string());
+    }
+
+    #[test]
+    fn test_create_table_with_column_constraints() {
+        let query = b"CREATE TABLE users (id INT, name TEXT UNIQUE)";
+        let ast = sql_parser(query).unwrap();
+
+        assert_eq!(
+            ast,
+            vec![ASTNode::Create {
+                table: Identifier::Name("users".to_string()),
+                columns: vec![
+                    (
+                        Identifier::Name("id".to_string()),
+                        Identifier::Name("INT".to_string()),
+                        vec![]
+                    ),
+                    (
+                        Identifier::Name("name".to_string()),
+                        Identifier::Name("TEXT".to_string()),
+                        vec!["UNIQUE".to_string()]
+                    ),
+                ],
+            }]
+        );
     }
 
     #[test]
@@ -545,13 +693,12 @@ mod tests {
                     Identifier::Name("name".to_string())
                 ],
                 values: vec![
-                    Identifier::Literal("1".to_string(), Some(String)),
-                    Identifier::Literal("\"John Doe\"".to_string(), Some(String)) // Now parsed correctly
+                    Identifier::Literal("1".to_string(), Some(DataType::Int)), // Numeric literal
+                    Identifier::Literal("John Doe".to_string(), Some(DataType::String)), // String literal
                 ]
             }]
         );
     }
-
 
     #[test]
     fn test_insert_without_columns() {
@@ -562,10 +709,76 @@ mod tests {
                 table: Identifier::Name("users".to_string()),
                 columns: vec![], // No columns specified
                 values: vec![
-                    Identifier::Literal("1".to_string(), Some(String)),
-                    Identifier::Literal("\"test\"".to_string(), Some(String)),
+                    Identifier::Literal("1".to_string(), Some(Int)),
+                    Identifier::Literal("test".to_string(), Some(String)),
                 ],
             },
         ]);
+    }
+
+    #[test]
+    fn test_update_with_assignment() {
+        let query = b"UPDATE users SET name = \"John Doe\" WHERE id = 1";
+        let ast = sql_parser(query).unwrap();
+
+        assert_eq!(
+            ast,
+            vec![
+                ASTNode::Update {
+                    table: Identifier::Name("users".to_string()),
+                    values: vec![(
+                        Identifier::Name("name".to_string()),
+                        Identifier::Literal("John Doe".to_string(), Some(String)),
+                    )],
+                },
+                ASTNode::Where {
+                    condition: Expression::Comparison {
+                        left: Identifier::Name("id".to_string()),
+                        operator: "=".to_string(),
+                        right: Identifier::Literal("1".to_string(), None),
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_delete_statement() {
+        let query = b"DELETE FROM users WHERE id = 1";
+        let ast = sql_parser(query).unwrap();
+
+        assert_eq!(
+            ast,
+            vec![
+                ASTNode::Delete {
+                    table: Identifier::Name("users".to_string()),
+                },
+                ASTNode::Where {
+                    condition: Expression::Comparison {
+                        left: Identifier::Name("id".to_string()),
+                        operator: "=".to_string(),
+                        right: Identifier::Literal("1".to_string(), None),
+                    }
+                }
+            ]
+        );
+    }
+
+
+    #[test]
+    fn test_invalid_syntax_missing_select_keyword() {
+        let query = b"* FROM users";
+        let ast = sql_parser(query);
+
+        assert!(ast.is_err());
+        assert_eq!(ast.err().unwrap(), "Unexpected token: *".to_string());
+    }
+
+    #[test]
+    fn test_nested_create_query() {
+        let query = b"CREATE TABLE orders (id INT, user_id INT, FOREIGN KEY (user_id) REFERENCES users(id))";
+        let ast = sql_parser(query);
+
+        assert!(ast.is_err()); // For now, let's err on complex unsupported syntax
     }
 }

@@ -364,5 +364,134 @@ pub fn get_column_names_from_schema(
     }
 }
 
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use mockall::mock;
 
+    // Mock AppState for testing
+    mock! {
+        AppState {
+            fn schema(&self) -> std::sync::MutexGuard<'_, Schema>;
+        }
+    }
 
+    #[test]
+    fn test_data_type_from_str() {
+        assert_eq!(DataType::from("int"), DataType::Int);
+        assert_eq!(DataType::from("integer"), DataType::Int);
+        assert_eq!(DataType::from("string"), DataType::String);
+        assert_eq!(DataType::from("text"), DataType::String);
+        assert_eq!(DataType::from("varchar"), DataType::String);
+        assert_eq!(DataType::from("uuid"), DataType::UUID);
+        assert_eq!(DataType::from("datetime"), DataType::DateTime);
+    }
+
+    #[test]
+    #[should_panic(expected = "Unsupported data type: invalid")]
+    fn test_data_type_from_str_invalid() {
+        DataType::from("invalid");
+    }
+
+    #[test]
+    fn test_map_string_to_rule() {
+        // Test NOT NULL constraint
+        let rule = map_string_to_rule("NOT NULL").unwrap();
+        assert!(matches!(rule.constraint_type, ConstraintType::NotNull));
+        assert!(matches!(rule.action, RuleAction::Reject));
+
+        // Test UNIQUE constraint
+        let rule = map_string_to_rule("UNIQUE").unwrap();
+        assert!(matches!(rule.constraint_type, ConstraintType::Unique));
+        assert!(matches!(rule.action, RuleAction::Reject));
+
+        // Test CHECK constraint
+        let rule = map_string_to_rule("CHECK (age > 18)").unwrap();
+        match rule.constraint_type {
+            ConstraintType::Check(Expression::Comparison { left, operator, right }) => {
+                assert_eq!(left, Identifier::Name("age".to_string()));
+                assert_eq!(operator, ">".to_string());
+                assert_eq!(right, Identifier::Literal("18".to_string(), Some(DataType::Int)));
+            },
+            _ => panic!("Expected Check constraint"),
+        }
+    }
+
+    #[test]
+    fn test_parse_expression() {
+        // Test basic comparison
+        let expr = parse_expression("age > 18").unwrap();
+        match expr {
+            Expression::Comparison { left, operator, right } => {
+                assert_eq!(left, Identifier::Name("age".to_string()));
+                assert_eq!(operator, ">".to_string());
+                assert_eq!(right, Identifier::Literal("18".to_string(), Some(DataType::Int)));
+            },
+            _ => panic!("Expected Comparison expression"),
+        }
+
+        // Test string comparison
+        let expr = parse_expression("name = 'John'").unwrap();
+        match expr {
+            Expression::Comparison { left, operator, right } => {
+                assert_eq!(left, Identifier::Name("name".to_string()));
+                assert_eq!(operator, "=".to_string());
+                assert_eq!(right, Identifier::Literal("John".to_string(), Some(DataType::String)));
+            },
+            _ => panic!("Expected Comparison expression"),
+        }
+    }
+
+    #[test]
+    fn test_is_valid_data_type() {
+        // Test Integer validation
+        assert!(is_valid_data_type(&DataType::Int, "123"));
+        assert!(!is_valid_data_type(&DataType::Int, "abc"));
+
+        // Test String validation
+        assert!(is_valid_data_type(&DataType::String, "any string"));
+
+        // Test UUID validation
+        assert!(is_valid_data_type(&DataType::UUID, "550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!is_valid_data_type(&DataType::UUID, "invalid-uuid"));
+
+        // Test DateTime validation
+        assert!(is_valid_data_type(&DataType::DateTime, "2024-03-21 15:30:00"));
+        assert!(!is_valid_data_type(&DataType::DateTime, "invalid-date"));
+    }
+
+    #[test]
+    fn test_create_table() -> Result<()> {
+        let mut schema = Schema::default();
+        let config = DatabaseConfig {
+            db_dir: PathBuf::from("test_db"),
+            schema_file: "schema.json".to_string().parse().unwrap(),
+            table_dir: "tables".to_string().parse().unwrap(),
+        };
+
+        // Create test directories
+        std::fs::create_dir_all(config.db_dir.join(&config.table_dir))?;
+
+        let table = Table {
+            name: "test_table".to_string(),
+            columns: vec![
+                Column {
+                    name: "name".to_string(),
+                    data_type: DataType::String,
+                    rules: vec![],
+                },
+            ],
+        };
+
+        create_table(&mut schema, table, &config)?;
+
+        // Verify both initial and updates tables were created
+        assert!(schema.tables.contains_key("test_table_initial"));
+        assert!(schema.tables.contains_key("test_table_updates"));
+
+        // Cleanup
+        std::fs::remove_dir_all("test_db")?;
+        Ok(())
+    }
+}

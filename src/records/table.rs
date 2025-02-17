@@ -802,6 +802,11 @@ async fn get_table_api(path: web::Path<String>, data: web::Data<AppState>) -> im
 
     match get_table_data(data.clone(), &table_name).await {
         Ok(table_data) => {
+
+            if table_data.is_empty() {
+                return HttpResponse::NotFound().body("Table not found Or Table data is empty.");  // Return 404
+            }
+
             // Format table data for JSON
             let formatted_data: Vec<Vec<serde_json::Value>> = table_data
                 .iter()
@@ -878,3 +883,7 @@ async fn get_table_at_timestamp_api(
     }
 }
 
+#[cfg(test)]
+mod table_tests {
+
+}

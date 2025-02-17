@@ -538,7 +538,7 @@ fn parse_update_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
 
 
 #[cfg(test)]
-mod tests {
+mod parser_tests {
     use crate::query::parser::DataType::String;
     use crate::schema::schema::DataType::Int;
     use super::*;

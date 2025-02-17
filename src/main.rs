@@ -1,12 +1,9 @@
-use actix_web::{test, web, App, HttpRequest, HttpServer, Responder};
+use actix_web::{ web, App, HttpRequest, HttpServer, Responder};
 use std::collections::{BTreeMap};
-use std::fs;
 use actix_files::Files;
 use std::io::{Result};
-use std::path::PathBuf;
 use std::string::String;
 use std::sync::{Arc, Mutex};
-use actix_web::http::StatusCode;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use crate::executer::executer::execute_query_endpoint;
@@ -41,17 +38,6 @@ fn init_database(config: &DatabaseConfig) -> Result<()> {
     std::fs::create_dir_all(&config.db_dir)?;
     std::fs::create_dir_all(config.db_dir.join(config.table_dir.as_path()))?;
     Ok(())
-}
-// Serve a specific HTML page based on the route
-async fn serve_page(req: HttpRequest) -> impl Responder {
-    let path = req.match_info().query("filename");
-    let page = format!("./static/html/{}", path);
-
-    // Serve the file if it exists
-    actix_files::NamedFile::open(page).unwrap_or_else(|_| {
-        // Serve a 404 page if the file is not found
-        actix_files::NamedFile::open("./static/html/404.html").unwrap()
-    })
 }
 
 #[actix_web::main]
@@ -95,13 +81,6 @@ async fn main() -> std::io::Result<()> {
             .route("/", web::get().to(|| async {
                 actix_files::NamedFile::open("./static/html/index.html").unwrap()
             }))
-            // // Fallback for unknown routes (return 404 or a generic page)
-            // .default_service(
-            //     web::route().to(|| async {
-            //         actix_files::NamedFile::open("./static/html/404.html").unwrap()
-            //     })
-            // )
-
 })
         .bind(("0.0.0.0", 8080))? // Bind to all network interfaces on port 8080
         .run()

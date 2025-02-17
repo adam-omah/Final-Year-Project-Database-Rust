@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Table Data</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+<div id="sidebar">
+    <div class="button-container">
+        <button onclick="location.href='/'" class="nav-button">Home</button>
+        <button onclick="location.href='/tables'" class="nav-button">Tables</button>
+    </div>
+</div>
+
+<div id="content">
+    <h1 id="table-title">Table: </h1>
+
+    <!-- Query execution area -->
+    <textarea id="query-box" placeholder="Enter SQL query here..."></textarea>
+    <button id="execute-query">Execute</button>
+
+    <!-- Output section -->
+    <div id="output-section">
+        <div id="error-message" class="error" style="display: none;"></div>
+        <table id="result-table" style="display: none;">
+            <thead id="table-head"></thead>
+            <tbody id="table-body"></tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    const tableName = location.pathname.split('/').pop(); // Extract table name from URL
+    const tableTitle = document.getElementById('table-title');
+    tableTitle.textContent = `Table: ${tableName}`;
+
+    /**
+     * Fetch and return column names for the table.
+     */
+    async function fetchColumnNames() {
+        try {
+            const response = await fetch(`/api/tables/${tableName}/columns`);
+            if (!response.ok) {
+                throw new Error(`Failed to fetch column names: ${response.statusText}`);
+            }
+            const columnNames = await response.json();
+            if (!Array.isArray(columnNames) || columnNames.length === 0) {
+                throw new Error('No columns found for this table.');
+            }
+            return columnNames;
+        } catch (error) {
+            const errorMessageDiv = document.getElementById('error-message');
+            errorMessageDiv.style.display = 'block';
+            errorMessageDiv.textContent = `Error: ${error.message}`;
+            throw error; // Re-throw error to prevent further table loading
+        }
+    }
+
+    /**
+     * Fetch and render table data.
+     */
+    async function fetchTableData() {
+        try {
+            // Fetch the column names first
+            const columnNames = await fetchColumnNames();
+
+            // Now fetch the table data
+            const response = await fetch(`/api/tables/${tableName}`);
+            if (!response.ok) {
+                throw new Error(`Failed to fetch table data: ${response.statusText}`);
+            }
+            const tableData = await response.json();
+            if (tableData.length === 0) {
+                throw new Error('No data in this table.');
+            }
+
+            // Populate the table with the fetched column names and data
+            const tableHead = document.getElementById('table-head');
+            const tableBody = document.getElementById('table-body');
+            const resultTable = document.getElementById('result-table');
+
+            // Clear any previous data
+            tableHead.innerHTML = '';
+            tableBody.innerHTML = '';
+
+            // Add table headers
+            const headerRow = document.createElement('tr');
+            columnNames.forEach(columnName => {
+                const th = document.createElement('th');
+                th.textContent = columnName;
+                headerRow.appendChild(th);
+            });
+            tableHead.appendChild(headerRow);
+
+            // Add table rows (map indices in row data to column names)
+            tableData.forEach(row => {
+                const rowElement = document.createElement('tr');
+                columnNames.forEach((_, index) => {
+                    const td = document.createElement('td');
+                    td.textContent = row[index] ?? 'NULL'; // Match column index to row value
+                    rowElement.appendChild(td);
+                });
+                tableBody.appendChild(rowElement);
+            });
+
+            // Display the table
+            resultTable.style.display = 'table';
+        } catch (error) {
+            const errorMessageDiv = document.getElementById('error-message');
+            errorMessageDiv.style.display = 'block';
+            errorMessageDiv.textContent = `Error: ${error.message}`;
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', fetchTableData);
+
+    // Execute query functionality (same as before)
+    document.getElementById('execute-query').addEventListener('click', async () => {
+        const queryText = document.getElementById('query-box').value.trim();
+        const errorMessageDiv = document.getElementById('error-message');
+        const resultTable = document.getElementById('result-table');
+        const tableHead = document.getElementById('table-head');
+        const tableBody = document.getElementById('table-body');
+        errorMessageDiv.style.display = 'none';
+        resultTable.style.display = 'none';
+        errorMessageDiv.textContent = '';
+        tableHead.innerHTML = '';
+        tableBody.innerHTML = '';
+
+        if (!queryText) {
+            errorMessageDiv.style.display = 'block';
+            errorMessageDiv.textContent = 'Query cannot be empty.';
+            return;
+        }
+        try {
+            const response = await fetch('/query', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: queryText, table: tableName }),
+            });
+            if (!response.ok) {
+                throw new Error(await response.text());
+            }
+            const result = await response.json();
+
+            // Similar logic to render the result table (if needed)
+        } catch (error) {
+            errorMessageDiv.style.display = 'block';
+            errorMessageDiv.textContent = `Error: ${error.message}`;
+        }
+    });
+</script>
+</body>
+</html>

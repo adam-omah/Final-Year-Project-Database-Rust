@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tables</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+<div id="sidebar">
+    <div class="button-container">
+        <button onclick="location.href='/'" class="nav-button">Home</button>
+        <button onclick="location.href='/tables'" class="nav-button">Tables</button>
+    </div>
+</div>
+
+<div id="content">
+    <h1>Database Tables</h1>
+    <ul id="tables-list">
+        <!-- List of tables will be dynamically populated here -->
+    </ul>
+</div>
+
+<script>
+    // Fetch the list of tables
+    document.addEventListener('DOMContentLoaded', async () => {
+        const tablesList = document.getElementById('tables-list');
+        try {
+            const response = await fetch('/api/tables'); // Call API to fetch table names
+            if (!response.ok) {
+                throw new Error(`Failed to fetch tables: ${response.statusText}`);
+            }
+            const tables = await response.json();
+
+            // Dynamically create a list item and link for each table
+            tables.forEach(tableName => {
+                const listItem = document.createElement('li');
+                const link = document.createElement('a');
+                link.href = `/tables/${tableName}`;
+                link.textContent = tableName;
+                listItem.appendChild(link);
+                tablesList.appendChild(listItem);
+            });
+        } catch (error) {
+            const errorMessage = document.createElement('p');
+            errorMessage.textContent = `Error: ${error.message}`;
+            errorMessage.className = 'error';
+            tablesList.appendChild(errorMessage);
+        }
+    });
+</script>
+</body>
+</html>

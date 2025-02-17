@@ -795,8 +795,33 @@ pub async fn get_column_values(
     Ok(values)
 }
 
+pub async fn get_column_names(
+    table_name: &str,
+    state: &web::Data<AppState>,
+) -> Result<Vec<String>> {
+    // Acquire a lock on the schema to read table definitions
+    let schema = state.schema.lock().unwrap();
 
-#[get("/tables/{table_name}")]
+    // Construct the initial table name used in the schema
+    let initial_table_name = format!("{}_initial", table_name);
+
+    // Look up the table in the schema
+    let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::NotFound,
+            format!("Table '{}' does not exist in the schema", initial_table_name),
+        )
+    })?;
+
+    // Extract the column names from the `columns` field of the table
+    let column_names: Vec<String> = table.columns.iter().map(|col| col.name.clone()).collect();
+
+    Ok(column_names)
+}
+
+
+
+#[get("/api/tables/{table_name}")]
 async fn get_table_api(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
     let table_name = path.into_inner();
 
@@ -838,7 +863,7 @@ async fn get_table_api(path: web::Path<String>, data: web::Data<AppState>) -> im
 }
 
 
-#[get("/tables/{table_name}/at/{timestamp}")]
+#[get("/api/tables/{table_name}/at/{timestamp}")]
 async fn get_table_at_timestamp_api(
     path: web::Path<(String, String)>,
     data: web::Data<AppState>,
@@ -881,6 +906,51 @@ async fn get_table_at_timestamp_api(
         }
     }
 }
+
+#[get("/api/tables")]
+async fn list_tables_api(state: web::Data<AppState>) -> impl Responder {
+    // Acquire a read lock to access the schema
+    let schema = state.schema.lock().unwrap();
+
+    // Create a `HashSet` to store unique base table names by removing `_initial` and `_updates` suffixes
+    let mut base_table_names = HashSet::new();
+
+    for table_name in schema.tables.keys() {
+        if let Some(base_name) = table_name.strip_suffix("_initial") {
+            base_table_names.insert(base_name.to_string());
+        } else if let Some(base_name) = table_name.strip_suffix("_updates") {
+            base_table_names.insert(base_name.to_string());
+        } else {
+            // If the table doesn't have any special suffixes, add it as-is
+            base_table_names.insert(table_name.clone());
+        }
+    }
+
+    // Convert the `HashSet` to a sorted `Vec` for consistent output
+    let mut table_list: Vec<String> = base_table_names.into_iter().collect();
+    table_list.sort();
+
+    // Return JSON containing the list of base table names
+    HttpResponse::Ok().json(table_list)
+}
+
+#[get("/api/tables/{table_name}/columns")]
+async fn get_column_names_api(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
+    let table_name = path.into_inner();
+
+    // Call the `get_column_names` function
+    match get_column_names(&table_name, &data).await {
+        Ok(column_names) => HttpResponse::Ok().json(column_names),
+        Err(e) => {
+            if e.kind() == ErrorKind::NotFound {
+                HttpResponse::NotFound().json(serde_json::json!({"error": e.to_string()}))
+            } else {
+                HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+            }
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod table_tests {

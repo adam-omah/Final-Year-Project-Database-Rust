@@ -1,4 +1,4 @@
-use actix_web::{test, web, App, HttpServer};
+use actix_web::{test, web, App, HttpRequest, HttpServer, Responder};
 use std::collections::{BTreeMap};
 use std::fs;
 use actix_files::Files;
@@ -11,7 +11,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use crate::executer::executer::execute_query_endpoint;
 use crate::config::database_config::DatabaseConfig;
-use crate::records::table::{get_table_api, get_table_at_timestamp_api};
+use crate::records::table::{get_column_names_api, get_table_api, get_table_at_timestamp_api, list_tables_api};
 use schema::{
     schema::load_schema,
     schema::Schema,
@@ -42,18 +42,32 @@ fn init_database(config: &DatabaseConfig) -> Result<()> {
     std::fs::create_dir_all(config.db_dir.join(config.table_dir.as_path()))?;
     Ok(())
 }
+// Serve a specific HTML page based on the route
+async fn serve_page(req: HttpRequest) -> impl Responder {
+    let path = req.match_info().query("filename");
+    let page = format!("./static/html/{}", path);
+
+    // Serve the file if it exists
+    actix_files::NamedFile::open(page).unwrap_or_else(|_| {
+        // Serve a 404 page if the file is not found
+        actix_files::NamedFile::open("./static/html/404.html").unwrap()
+    })
+}
 
 #[actix_web::main]
-async fn main() -> Result<()> {
+async fn main() -> std::io::Result<()> {
+    // Initialize tracing for logging
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // Load database configuration and schema
     let config = DatabaseConfig::default();
     init_database(&config)?;
     let schema = Arc::new(Mutex::new(load_schema(&config)?));
     let cache = Arc::new(Mutex::new(BTreeMap::new())); // Initialize the cache.
 
+    // Start the Actix Web HTTP server
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(AppState {
@@ -61,16 +75,41 @@ async fn main() -> Result<()> {
                 config: config.clone(),
                 cache: cache.clone(),
             }))
-            .service(get_table_api)
+            // API endpoints
+            .service(get_table_api)               // Updated API for fetching table data
+            .service(get_table_at_timestamp_api)  // Updated API for fetching table data at a specific timestamp
+            .service(list_tables_api)             // Updated API for listing all tables
             .service(execute_query_endpoint)
-            .service(get_table_at_timestamp_api)
-            .service(Files::new("/", "./static/html").index_file("index.html"))
-    })
-        .bind(("0.0.0.0", 8080))?
+            .service(get_column_names_api)// Existing route unchanged
+            // Static file serving
+            .service(Files::new("/static", "./static").show_files_listing())
+            // Route for `/tables` -> `tables.html`
+            .route("/tables", web::get().to(|| async {
+                actix_files::NamedFile::open("./static/html/tables.html").unwrap()
+            }))
+            // Route for `/tables/{table_name}` -> `table_data.html`
+            .route("/tables/{table_name}", web::get().to(|| async {
+                actix_files::NamedFile::open("./static/html/table_data.html").unwrap()
+            }))
+            // Handle root route `/` to load `index.html`
+            .route("/", web::get().to(|| async {
+                actix_files::NamedFile::open("./static/html/index.html").unwrap()
+            }))
+            // // Fallback for unknown routes (return 404 or a generic page)
+            // .default_service(
+            //     web::route().to(|| async {
+            //         actix_files::NamedFile::open("./static/html/404.html").unwrap()
+            //     })
+            // )
+
+})
+        .bind(("0.0.0.0", 8080))? // Bind to all network interfaces on port 8080
         .run()
         .await?;
+
     Ok(())
 }
+
 
 
 /*

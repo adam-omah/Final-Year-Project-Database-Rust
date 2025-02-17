@@ -44,12 +44,11 @@ pub async fn execute_query(
                 return handle_delete(table, &data, &where_clause).await;
             }
             _ => {
-                return HttpResponse::BadRequest().body("Unsupported AST Node type");
+                return HttpResponse::BadRequest().json(serde_json::json!({"error": "Unsupported AST Node type"}));
             }
         }
     }
-
-    HttpResponse::BadRequest().body("No valid SQL query provided")
+    HttpResponse::BadRequest().json(serde_json::json!({"error": "No valid SQL query provided"}))
 }
 
 async fn handle_select(
@@ -74,7 +73,7 @@ async fn handle_select(
                 if let Some(condition) = &where_clause {
                     let column_names = match get_column_names_from_schema(&data, table_name) {
                         Ok(names) => names,
-                        Err(_) => return HttpResponse::InternalServerError().body("Error fetching column names"),
+                        Err(_) => { return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Error fetching column names"})) }
                     };
 
                     table_data = table_data
@@ -87,24 +86,24 @@ async fn handle_select(
                 let result = process_select(columns, &table_data, data.clone(), table_name, where_clause).await;
 
                 if result.is_empty() {
-                    HttpResponse::Ok().body("No rows found")
+                    HttpResponse::Ok().json(serde_json::json!({ "message": "No rows found" }))
                 } else {
                     match serde_json::to_string(&result) {
-                        Ok(json) => HttpResponse::Ok().body(json),
-                        Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
+                        Ok(json) => HttpResponse::Ok().json(serde_json::from_str::<serde_json::Value>(&json).unwrap()),
+                        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Serialization error: {}", e)}))
                     }
                 }
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    HttpResponse::NotFound().body("Table data not found")
+                    HttpResponse::NotFound().json(serde_json::json!({"error": "Table data not found"}))
                 } else {
-                    HttpResponse::InternalServerError().body(format!("Error retrieving table data: {}", e))
+                    HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error retrieving table data: {}", e)}))
                 }
             }
         }
     } else {
-        HttpResponse::BadRequest().body("Invalid table name")
+        HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid table name" }))
     }
 }
 
@@ -142,11 +141,11 @@ fn handle_create_table(
 
         // Execute the table creation
         match create_table(&schema_table, data) {
-            Ok(_) => HttpResponse::Ok().body("Table Created"),
-            Err(err) => HttpResponse::InternalServerError().body(format!("Error creating table: {}", err)),
+            Ok(_) => HttpResponse::Ok().json(serde_json::json!({"message": "Table Created"})),
+            Err(err) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error creating table: {}", err)}))
         }
     } else {
-        HttpResponse::BadRequest().body("Invalid table name in CREATE TABLE")
+        HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid table name in CREATE TABLE"}))
     }
 }
 
@@ -181,11 +180,11 @@ async fn handle_insert(
 
         // Insert the row into the table
         match insert_row(table_name, row_data, data, column_names).await {
-            Ok(_) => HttpResponse::Ok().body("Row inserted"),
-            Err(err) => HttpResponse::InternalServerError().body(format!("Error inserting row: {}", err)),
+            Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "message": "Row inserted" })),
+            Err(err) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error inserting row: {}", err)})),
         }
     } else {
-        HttpResponse::BadRequest().body("Invalid table name in INSERT statement")
+        HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid table name in INSERT statement"}))
     }
 }
 
@@ -197,8 +196,9 @@ async fn handle_delete(
     if let Identifier::Name(table_name) = table {
         // Ensure a WHERE clause is provided
         if where_clause.is_none() {
-            return HttpResponse::BadRequest().body("DELETE must include a WHERE clause with a valid filter");
+            return HttpResponse::BadRequest().json(serde_json::json!({"error": "DELETE must include a WHERE clause with a valid filter"}));
         }
+
 
         let condition = where_clause.as_ref().unwrap();
 
@@ -219,24 +219,22 @@ async fn handle_delete(
                     .collect();
 
                 if rows_to_delete.is_empty() {
-                    return HttpResponse::NotFound().body("No rows matched the specified condition");
+                    return HttpResponse::NotFound().json(serde_json::json!({"error": "No rows matched the specified condition"}));
                 }
-
                 // Call `delete_row` for each filtered row
                 for row in &rows_to_delete {
                     if let Some(row_id) = row.get(0) {
                         if let Err(e) = delete_row(table_name, row_id, data).await {
-                            return HttpResponse::InternalServerError().body(format!("Error deleting row: {}", e));
+                            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error deleting row: {}", e)}));
                         }
                     }
                 }
-
-                HttpResponse::Ok().body(format!("Deleted {} rows", rows_to_delete.len()))
+                HttpResponse::Ok().json(serde_json::json!({"message": format!("Deleted {} rows", rows_to_delete.len())}))
             }
-            Err(e) => HttpResponse::InternalServerError().body(format!("Error loading initial data: {}", e)),
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error loading initial data: {}", e)})),
         }
     } else {
-        HttpResponse::BadRequest().body("Invalid table name in DELETE statement")
+        HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid table name in DELETE statement"}))
     }
 }
 
@@ -260,15 +258,12 @@ async fn handle_update(
 
         // Ensure a WHERE clause is provided
         if where_clause.is_none() {
-            return HttpResponse::BadRequest().body("UPDATE must include a WHERE clause with a valid UUID");
+            return HttpResponse::BadRequest().json(serde_json::json!({"error": "UPDATE must include a WHERE clause with a valid UUID"}));
         }
 
         let condition = where_clause.as_ref().unwrap();
         if !is_uuid_where_clause(condition) {
-            return HttpResponse::BadRequest().body(format!(
-                "WHERE clause must contain a valid UUID condition for table '{}'",
-                table_name
-            ));
+            return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("WHERE clause must contain a valid UUID condition for table '{}'",table_name)}));
         }
 
         // Load data to process the update
@@ -288,33 +283,28 @@ async fn handle_update(
                     .collect();
 
                 if filtered_rows.is_empty() {
-                    return HttpResponse::NotFound().body("No rows matched the specified condition");
+                    return HttpResponse::NotFound().json(serde_json::json!({"error": "No rows matched the specified condition"}));
                 }
 
                 // Apply updates to the filtered rows
                 for row in &filtered_rows {
                     if let Some(row_id) = row.get(0) {
                         if let Err(e) = update_row(table_name, row_id, updated_values.clone(), data).await {
-                            return HttpResponse::InternalServerError().body(format!("Error updating row: {}", e));
+                            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error updating row: {}", e)}));
                         }
                     }
                 }
-
                 if let Err(e) = recalculate_table(data, table_name, initial_data).await {
-                    return HttpResponse::InternalServerError()
-                        .body(format!("Error recalculating data: {}", e));
+                    return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error recalculating data: {}", e)}));
                 }
-
-                HttpResponse::Ok().body("Rows updated")
+                HttpResponse::Ok().json(serde_json::json!({"message": "Rows updated"}))
             }
-            Err(e) => HttpResponse::InternalServerError().body(format!("Error loading initial data: {}", e)),
+            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error loading initial data: {}", e)})),
         }
     } else {
-        HttpResponse::BadRequest().body("Invalid table name in UPDATE statement")
+        HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid table name in UPDATE statement"}))
     }
 }
-
-
 
 fn extract_column_name(identifier: &Identifier) -> String {
     match identifier {
@@ -516,9 +506,8 @@ async fn execute_query_endpoint(
             execute_query(ast_nodes, data, http_request).await
         }
         Err(err) => {
-            // Handle parse failure with a unified HttpResponse
-            HttpResponse::BadRequest()
-                .body(format!("Failed to parse query: {}", err))
+            // Handle parse failure with a unified JSON error response
+            HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Failed to parse query: {}", err)}))
         }
     }
 }

@@ -144,13 +144,14 @@ fn tokenize_query(query_str: &str) -> Result<Vec<String>, String> {
             }
             tokens.push(")".to_string());
         }
-
-
         else if char.is_whitespace() {
             if !current_token.is_empty() {
                 tokens.push(current_token.trim().to_string()); // Trim whitespace
                 current_token.clear();
             }
+        } else if char == ';' && !in_string {
+            // end token loop
+            break;
         } else {
             current_token.push(char);
         }

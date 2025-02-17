@@ -1,6 +1,7 @@
 use actix_web::{test, web, App, HttpServer};
 use std::collections::{BTreeMap};
 use std::fs;
+use actix_files::Files;
 use std::io::{Result};
 use std::path::PathBuf;
 use std::string::String;
@@ -63,6 +64,7 @@ async fn main() -> Result<()> {
             .service(get_table_api)
             .service(execute_query_endpoint)
             .service(get_table_at_timestamp_api)
+            .service(Files::new("/", "./static/html").index_file("index.html"))
     })
         .bind(("0.0.0.0", 8080))?
         .run()
@@ -194,7 +196,7 @@ mod app_tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK); // Expect 200 OK
         let body = test::read_body(resp).await;
-        assert_eq!(body, "Table Created");
+        assert_eq!(body, "{\"message\":\"Table Created\"}");
 
         // Step 3: Check schema integrity
         let schema = app_state.schema.lock().unwrap();

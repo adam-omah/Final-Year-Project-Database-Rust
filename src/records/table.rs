@@ -802,9 +802,8 @@ async fn get_table_api(path: web::Path<String>, data: web::Data<AppState>) -> im
 
     match get_table_data(data.clone(), &table_name).await {
         Ok(table_data) => {
-
             if table_data.is_empty() {
-                return HttpResponse::NotFound().body("Table not found Or Table data is empty.");  // Return 404
+                return HttpResponse::NotFound().json(serde_json::json!({"error": "Table not found or table data is empty"})); // Return structured JSON for 404
             }
 
             // Format table data for JSON
@@ -823,16 +822,16 @@ async fn get_table_api(path: web::Path<String>, data: web::Data<AppState>) -> im
                 })
                 .collect();
 
-            match serde_json::to_string(&formatted_data) {
-                Ok(json) => HttpResponse::Ok().body(json),
-                Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
+            match serde_json::to_value(&formatted_data) {
+                Ok(json_value) => HttpResponse::Ok().json(json_value),
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Serialization error: {}", e)})),
             }
         }
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
-                HttpResponse::NotFound().body("Table data file not found")
+                HttpResponse::NotFound().json(serde_json::json!({"error": "Table data file not found"}))
             } else {
-                HttpResponse::InternalServerError().body(format!("Error retrieving table data: {}", e))
+                HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error retrieving table data: {}", e)}))
             }
         }
     }
@@ -868,16 +867,16 @@ async fn get_table_at_timestamp_api(
                 .collect();
 
             // Convert the formatted table data to JSON and send it in the response
-            match serde_json::to_string(&formatted_data) {
-                Ok(json) => HttpResponse::Ok().body(json),
-                Err(e) => HttpResponse::InternalServerError().body(format!("Serialization error: {}", e)),
+            match serde_json::to_value(&formatted_data) {
+                Ok(json_value) => HttpResponse::Ok().json(json_value),
+                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Serialization error: {}", e)})),
             }
         }
         Err(e) => {
             if e.kind() == ErrorKind::NotFound {
-                HttpResponse::NotFound().body("Table data file not found")
+                HttpResponse::NotFound().json(serde_json::json!({"error": "Table data file not found"}))
             } else {
-                HttpResponse::InternalServerError().body(format!("Error retrieving table data: {}", e))
+                HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error retrieving table data: {}", e)}))
             }
         }
     }

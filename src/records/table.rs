@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::log::debug;
 use crate::schema::schema::{check_column_rules, is_valid_data_type, DataType};
 use chrono::{NaiveDateTime, Utc};
-
+use uuid::Uuid;
 
 pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
     let mut schema = state.schema.lock().unwrap();
@@ -25,27 +25,85 @@ pub async fn insert_row(
     table_name: &str,
     row_data: Vec<String>,
     state: &web::Data<AppState>,
+    column_names: Option<Vec<String>>, // Add column names here
 ) -> Result<()> {
-    // Acquire schema lock and clone it for validation purposes
-    let schema = {
+    // Acquire schema lock and clone it
+    let schema_snapshot = {
         let schema_guard = state.schema.lock().unwrap();
         schema_guard.clone()
     };
 
+    // Build the table name used for schema lookup
     let initial_table_name = format!("{}_initial", table_name);
-    let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("Table '{}' does not exist in schema", initial_table_name),
-        )
-    })?;
+    let table_schema = schema_snapshot
+        .tables
+        .get(&initial_table_name)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Table '{}' does not exist in schema", initial_table_name),
+            )
+        })?;
 
-    // Prepare and validate row data
-    let mut row_data_map = HashMap::new();
-    for (index, column) in table.columns.iter().enumerate() {
-        row_data_map.insert(column.name.clone(), row_data.get(index).cloned().unwrap_or_default());
+    // Step 1: Build a `HashMap` to pair column names and their respective data values
+    let mut row_data_map: HashMap<String, String> = HashMap::new();
+
+    if let Some(provided_column_names) = column_names {
+        // Case when column names are provided
+        for (index, column_name) in provided_column_names.iter().enumerate() {
+            if index < row_data.len() {
+                row_data_map.insert(column_name.clone(), row_data[index].clone());
+            }
+        }
+    } else {
+        // Case when column names are NOT provided
+        // Ensure UUID is the first column, and remaining values align with schema
+        let mut data_index = 0;
+
+        for column in &table_schema.columns {
+            if column.name == "UUID" {
+                // Insert UUID (generate one if not provided in the data)
+                row_data_map.insert(
+                    column.name.clone(),
+                    if data_index < row_data.len() && Uuid::parse_str(&row_data[data_index]).is_ok() {
+                        // Use provided UUID if valid
+                        row_data[data_index].clone()
+                    } else {
+                        // Otherwise generate a new UUID
+                        Uuid::new_v4().to_string()
+                    },
+                );
+                // Increment index only if a UUID was provided
+                if data_index < row_data.len()
+                    && Uuid::parse_str(&row_data[data_index]).is_ok()
+                {
+                    data_index += 1;
+                }
+            } else{
+                // For all other columns assign values in schema order
+                row_data_map.insert(
+                    column.name.clone(),
+                    row_data.get(data_index).cloned().unwrap_or_default(), // Default to empty if missing
+                );
+                data_index += 1;
+            }
+        }
     }
-    let validated_row = validate_and_process_row(table_name, row_data_map, state).await?;
+
+    // Ensure all schema-defined columns are included
+    for column in &table_schema.columns {
+        row_data_map.entry(column.name.clone()).or_insert_with(|| {
+            if column.name == "UUID" {
+                // Generate a UUID if it's not provided
+                Uuid::new_v4().to_string()
+            } else {
+                String::new() // Default to an empty string for other columns
+            }
+        });
+    }
+
+    // Step 2: Pass the complete `row_data_map` into the `validate_and_process_row` function
+    let validated_row = validate_and_process_row(table_name, row_data_map.clone(), state).await?;
 
     // Prepare the `_initial` table file path
     let initial_table_path = Path::new(state.config.db_dir.as_path())

@@ -157,19 +157,15 @@ async fn handle_insert(
     data: &web::Data<AppState>,
 ) -> HttpResponse {
     if let Identifier::Name(table_name) = table {
-        let mut row_data: Vec<String> = values
+        let row_data: Vec<String> = values
             .iter()
             .filter_map(|value| match value {
                 Identifier::Literal(lit, _) => Some(lit.clone()),
                 _ => None,
             })
             .collect();
-
-        let uuid = Uuid::new_v4().to_string();
-        row_data.insert(0, uuid); // Add UUID as the first column
-
         // Optionally handle column names
-        let _column_names = if columns.is_empty() {
+        let column_names = if columns.is_empty() {
             None
         } else {
             Some(
@@ -184,7 +180,7 @@ async fn handle_insert(
         };
 
         // Insert the row into the table
-        match insert_row(table_name, row_data, data).await {
+        match insert_row(table_name, row_data, data, column_names).await {
             Ok(_) => HttpResponse::Ok().body("Row inserted"),
             Err(err) => HttpResponse::InternalServerError().body(format!("Error inserting row: {}", err)),
         }

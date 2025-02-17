@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
 */
 
 #[actix_web::test]
-async fn test_application() -> Result<()> {
+pub async fn test_application() -> Result<()> {
     use std::fs;
     use actix_web::http::StatusCode;
     use actix_web::test;
@@ -134,11 +134,10 @@ async fn test_application() -> Result<()> {
                 },
             ],
         };
-        if !schema.lock().unwrap().tables.contains_key("users") {
-            create_table(&user_table, &app_state)?;
-            insert_row("users", vec!["1".to_string(), "Alice".to_string()],&app_state).await?;
-            insert_row("users", vec!["2".to_string(), "Bob".to_string()],&app_state).await?;
-        };
+
+        create_table(&user_table, &app_state)?;
+        insert_row("users", vec!["9fe085ca-6e32-4757-86aa-b3774eb6561f".to_string(),"1".to_string(), "Alice".to_string(), "2025-02-17 11:39:41".to_string()],&app_state,None).await?;
+        insert_row("users", vec!["b42cd5b1-b732-427a-8bdb-a6aad547c168".to_string(),"2".to_string(), "Bob".to_string(), "2025-02-17 11:39:41".to_string()],&app_state, None).await?;
     };
 
 
@@ -172,7 +171,7 @@ async fn test_application() -> Result<()> {
     // Assert the expected data
     assert_eq!(
         result,
-        serde_json::json!([["1", "Alice"], ["2", "Bob"]])
+        serde_json::json!([["9fe085ca-6e32-4757-86aa-b3774eb6561f",1, "Alice","2025-02-17 11:39:41"], ["b42cd5b1-b732-427a-8bdb-a6aad547c168",2, "Bob","2025-02-17 11:39:41"]])
     );
     Ok(())
 }

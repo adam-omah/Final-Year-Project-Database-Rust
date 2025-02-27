@@ -20,15 +20,15 @@ RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/
 WORKDIR /app
 
 # Copy the compiled binary from the builder stage
-COPY --from=builder /app/target/release/Final_Year_Project_Database_Rust /app/Final_Year_Project_Database_Rust
+COPY --from=builder /app/target/release/Final-Year-Project-Database-Rust /app/Final-Year-Project-Database-Rust
 
 # Copy other necessary files (like database directory or schema files)
 COPY mydb ./mydb
 COPY mydb/schema.json ./mydb/schema.json
+COPY static ./static
 
 # Expose the port on which the Actix Web server runs
 EXPOSE 8080
 
 # Command to run the application
-CMD ["./Final_Year_Project_Database_Rust"]
-# Replace <binary_name> with your actual binary name
+CMD ["./Final-Year-Project-Database-Rust"]

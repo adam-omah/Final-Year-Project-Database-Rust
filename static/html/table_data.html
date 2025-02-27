@@ -20,6 +20,14 @@
     <!-- Query execution area -->
     <textarea id="query-box" placeholder="Enter SQL query here..."></textarea>
     <button id="execute-query">Execute</button>
+    <div id="execute-output-section">
+        <!-- Area to display results -->
+        <div id="execute-error-message" class="error" style="display: none;"></div>
+        <table id="execute-result-table" style="display: none;">
+            <thead id="execute-table-head"></thead>
+            <tbody id="execute-table-body"></tbody>
+        </table>
+    </div>
 
     <!-- Output section -->
     <div id="output-section">
@@ -119,10 +127,11 @@
     // Execute query functionality (same as before)
     document.getElementById('execute-query').addEventListener('click', async () => {
         const queryText = document.getElementById('query-box').value.trim();
-        const errorMessageDiv = document.getElementById('error-message');
-        const resultTable = document.getElementById('result-table');
-        const tableHead = document.getElementById('table-head');
-        const tableBody = document.getElementById('table-body');
+        const errorMessageDiv = document.getElementById('execute-error-message');
+        const resultTable = document.getElementById('execute-result-table');
+        const tableHead = document.getElementById('execute-table-head');
+        const tableBody = document.getElementById('execute-table-body');
+        // Clear previous results or errors
         errorMessageDiv.style.display = 'none';
         resultTable.style.display = 'none';
         errorMessageDiv.textContent = '';
@@ -135,17 +144,60 @@
             return;
         }
         try {
+            // Send query to backend
             const response = await fetch('/query', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: queryText, table: tableName }),
+                body: JSON.stringify(queryText), // Send raw query as JSON payload
             });
             if (!response.ok) {
-                throw new Error(await response.text());
+                const error = await response.text();
+                throw new Error(error);
             }
             const result = await response.json();
 
-            // Similar logic to render the result table (if needed)
+            // Check if the result is a message (object with a "message" field)
+            if (result.message) {
+                errorMessageDiv.style.display = 'block';
+                errorMessageDiv.textContent = result.message; // Display the message
+                await fetchTableData();
+                return; // No further processing needed
+            }
+
+            // If the result is an array (assumed table rows), process it
+            if (!Array.isArray(result) || result.length === 0) {
+                errorMessageDiv.style.display = 'block';
+                errorMessageDiv.textContent = 'Query returned no results.';
+                await fetchTableData();
+                return;
+            }
+
+            // Generate table headers from first row keys
+            const headers = Object.keys(result[0] || {});
+            const headerRow = document.createElement('tr');
+            headers.forEach(header => {
+                const th = document.createElement('th');
+                th.textContent = header;
+                headerRow.appendChild(th);
+            });
+            tableHead.appendChild(headerRow);
+
+            // Generate table rows
+            result.forEach(row => {
+                const rowElement = document.createElement('tr');
+                headers.forEach(header => {
+                    const td = document.createElement('td');
+                    td.textContent = row[header] ?? 'NULL';
+                    rowElement.appendChild(td);
+                });
+                tableBody.appendChild(rowElement);
+            });
+
+
+
+            // Show results
+            resultTable.style.display = 'table';
+            await fetchTableData();
         } catch (error) {
             errorMessageDiv.style.display = 'block';
             errorMessageDiv.textContent = `Error: ${error.message}`;

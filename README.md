@@ -27,10 +27,10 @@ Will set all Int values to 0 , timestamps to time of deletion, all String values
 ### Docker Commands
 Build Command:
 ``
-docker build -t final_year_project_database_rust . 
+docker build -t final-year-project-database-rust . 
 ``
 
 Run Container on Local Host (Change Port Bindings if config is changed):
 ``
-docker run -p 8080:8080 final_year_project_database_rust
+docker run -p 8080:8080 final-year-project-database-rust
 ``

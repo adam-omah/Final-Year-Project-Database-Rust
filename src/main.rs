@@ -127,6 +127,7 @@ mod app_tests {
             config: test_config.clone(),
             cache: cache.clone(),
         });
+
         if !schema.lock().unwrap().tables.contains_key("users") {
             let user_table = Table {
                 name: "users".to_string(),
@@ -147,14 +148,19 @@ mod app_tests {
             insert_row("users", vec!["9fe085ca-6e32-4757-86aa-b3774eb6561f".to_string(), "1".to_string(), "Alice".to_string(), "2025-02-17 11:39:41".to_string()], &app_state, None).await?;
             insert_row("users", vec!["b42cd5b1-b732-427a-8bdb-a6aad547c168".to_string(), "2".to_string(), "Bob".to_string(), "2025-02-17 11:39:41".to_string()], &app_state, None).await?;
         };
+
+
+
         let app = test::init_service(
             App::new()
                 .app_data(app_state.clone())
                 .service(get_table_api)
         )
             .await;
+
+
         // Create a test request
-        let req = test::TestRequest::get().uri("/tables/users").to_request();
+        let req = test::TestRequest::get().uri("/api/tables/users").to_request();
         // Execute the request and get the response
         let resp = test::call_service(&app, req).await;
 

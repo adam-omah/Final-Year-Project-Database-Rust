@@ -26,7 +26,9 @@ pub async fn execute_query(
             break; // Extract only the first WHERE clause
         }
     }
-    for (.., ast_node) in ast_nodes.iter().enumerate() {
+
+    #[allow(clippy::never_loop)]
+    for ast_node in ast_nodes.iter() {
         match ast_node {
             ASTNode::Select { columns, table, timestamp } => {
                 return handle_select(columns, table, timestamp, &data, where_clause.clone()).await;
@@ -445,7 +447,8 @@ pub fn evaluate_where_clause(
                 ">=" => left_val >= right_val,
                 "<=" => left_val <= right_val,
                 "LIKE" => {
-                    return evaluate_like_condition(&left_val, &right_val);
+                    let result = evaluate_like_condition(&left_val, &right_val);
+                    result
                 }
                 _ => false, // Unsupported
             }

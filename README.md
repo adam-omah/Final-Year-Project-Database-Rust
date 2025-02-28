@@ -34,3 +34,7 @@ Run Container on Local Host (Change Port Bindings if config is changed):
 ``
 docker run -p 8080:8080 final-year-project-database-rust
 ``
+
+## Cargo Clippy and Cargo Sonar.
+
+cargo clippy --message-format=json > my-clippy-report.json

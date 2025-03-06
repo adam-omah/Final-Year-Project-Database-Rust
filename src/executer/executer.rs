@@ -26,6 +26,7 @@ pub async fn execute_query(
             break; // Extract only the first WHERE clause
         }
     }
+    #[allow(clippy::never_loop)]
     for (.., ast_node) in ast_nodes.iter().enumerate() {
         match ast_node {
             ASTNode::Select { columns, table, timestamp } => {

@@ -1,9 +1,11 @@
 use actix_web::{ web, App, HttpRequest, HttpServer, Responder};
 use std::collections::{BTreeMap};
+use std::env;
 use actix_files::Files;
 use std::io::{Result};
 use std::string::String;
 use std::sync::{Arc, Mutex};
+use tracing::log::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use crate::executer::executer::execute_query_endpoint;
@@ -23,7 +25,7 @@ mod executer;
 
 
 // public constants
-pub const DB_DIR: &str = "mydb";
+pub const DB_DIR: &str = "my_rust_db";
 pub const SCHEMA_FILE: &str = "schema.json";
 pub const TABLE_DIR: &str = "tables";
 
@@ -36,6 +38,7 @@ pub struct AppState {
 
 fn init_database(config: &DatabaseConfig) -> Result<()> {
     std::fs::create_dir_all(&config.db_dir)?;
+    info!("Creating database directory: '{}'", config.db_dir.display());
     std::fs::create_dir_all(config.db_dir.join(config.table_dir.as_path()))?;
     Ok(())
 }
@@ -48,19 +51,42 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     // Load database configuration and schema
-    let config = DatabaseConfig::default();
+    let config = DatabaseConfig::from_yaml(&[
+        "./config.yaml",           // Current directory
+        "/app/config.yaml",        // Docker container path
+        "/etc/myapp/config.yaml",  // System-wide config
+        "../config.yaml",          // From local
+    ])
+        .unwrap_or_else(|_| DatabaseConfig::default());
     init_database(&config)?;
     let schema = Arc::new(Mutex::new(load_schema(&config)?));
     let cache = Arc::new(Mutex::new(BTreeMap::new())); // Initialize the cache.
 
+    // Read hostname from environment variable, default to 0.0.0.0
+    let hostname = env::var("HOSTNAME").unwrap_or_else(|_| "0.0.0.0".to_string());
+
+    // Read port from environment variable, default to 8080
+    let port = env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse()
+        .expect("Invalid port number");
+
+    // Initialize the database
+    init_database(&config).expect("Failed to initialize database");
+
+    // Create app state
+    let app_state = AppState {
+        schema: schema.clone(),
+        config: config.clone(),
+        cache: cache.clone(),
+    };
+
+
+
     // Start the Actix Web HTTP server
     HttpServer::new(move || {
         App::new()
-            .app_data(web::Data::new(AppState {
-                schema: schema.clone(),
-                config: config.clone(),
-                cache: cache.clone(),
-            }))
+            .app_data(web::Data::new(app_state.clone()))
             // API endpoints
             .service(get_table_api)               // Updated API for fetching table data
             .service(get_table_at_timestamp_api)  // Updated API for fetching table data at a specific timestamp
@@ -82,7 +108,7 @@ async fn main() -> std::io::Result<()> {
                 actix_files::NamedFile::open("./static/html/index.html").unwrap()
             }))
 })
-        .bind(("0.0.0.0", 8080))? // Bind to all network interfaces on port 8080
+        .bind((hostname.as_str(), port))? // Bind to all network interfaces on port 8080
         .run()
         .await?;
 

@@ -1,5 +1,5 @@
 # Use the official Rust image as the base image
-FROM rust:1.84.0 as builder
+FROM rust:1.84.0 AS builder
 
 # Set the working directory in the container
 WORKDIR /app
@@ -23,12 +23,21 @@ WORKDIR /app
 COPY --from=builder /app/target/release/Final-Year-Project-Database-Rust /app/Final-Year-Project-Database-Rust
 
 # Copy other necessary files (like database directory or schema files)
-COPY mydb ./mydb
-COPY mydb/schema.json ./mydb/schema.json
+COPY my_rust_db ./mydb
+COPY my_rust_db/schema.json ./mydb/schema.json
 COPY static ./static
+COPY config.yaml ./config.yaml
+
 
 # Expose the port on which the Actix Web server runs
-EXPOSE 8080
+ARG PORT=8080
+EXPOSE ${PORT}
+
+# Set default environment variables
+ENV PORT=${PORT}
+ENV CONFIG_PATH=/app/config.yaml
+
+
 
 # Command to run the application
 CMD ["./Final-Year-Project-Database-Rust"]

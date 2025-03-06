@@ -34,3 +34,18 @@ Run Container on Local Host (Change Port Bindings if config is changed):
 ``
 docker run -p 8080:8080 final-year-project-database-rust
 ``
+
+Docker Run with custom container name:
+``
+docker run --name my-rust-database-8081 -p 8081:8081 -e PORT=8081 final-year-project-database-rust
+``
+
+Tagging for docker hub:
+``
+docker tag final-year-project-database-rust adam0mah/rust-db-engine:test-ver-1
+``
+
+Pushing to docker Hub:
+``
+docker push adam0mah/rust-db-engine:test-ver-1
+``

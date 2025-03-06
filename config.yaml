@@ -1,0 +1,4 @@
+db_dir: "my_rust_db"
+schema_file: "schema.json"
+table_dir: "tables"
+database_name: "my_rust_db"

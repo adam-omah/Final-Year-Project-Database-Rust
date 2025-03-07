@@ -9,14 +9,15 @@ use std::path::Path;
 use crate::query::parser::Identifier;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
-use tracing::log::debug;
+use tracing::log::{debug, info};
 use crate::schema::schema::{check_column_rules, is_valid_data_type, DataType};
-use chrono::{NaiveDateTime, Utc};
+use chrono::{Local, NaiveDateTime, Utc};
 use uuid::Uuid;
+use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 
 pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
     let mut schema = state.schema.lock().unwrap();
-    schema_create_table(&mut schema, table.clone(), &state.config)?;
+    schema_create_table(&mut schema, table.clone(), &state.config, &state.change_logger)?;
     drop(schema);
     Ok(())
 }
@@ -117,15 +118,28 @@ pub async fn insert_row(
         .collect::<Vec<String>>()
         .join(",");
 
-
     // Open the `_initial` table file in append-only mode and write the data
     let mut writer = open_table_file_append_only(&initial_table_path)?;
     write_newline_if_needed(&initial_table_path)?;
     writeln!(writer, "{}", serialized_row)
         .map_err(|e| std::io::Error::new(e.kind(), format!("Failed to write initial values  to file: {}", e)))?;
 
+    let cache_row = validated_row
+        .iter()
+        .map(|value| quote_if_needed(value))
+        .collect::<Vec<String>>();
     // Add the validated row directly to the cache
-    add_row_to_cache(table_name, validated_row, state).await?;
+    add_row_to_cache(table_name, cache_row.clone(), state).await?;
+
+    state.change_logger.log_change(
+        None,
+        ChangeType::Insert,
+        table_name.to_string(),
+        serde_json::json!({
+            "row_data": cache_row.clone()
+        }),
+        None
+    )?;
     Ok(())
 }
 
@@ -154,11 +168,13 @@ pub async fn update_row(
 
     // Check if UUID exists in the current table state
     let current_data = get_table_data(state.clone(), table_name).await?;
+    info!("Current data: {:#?}", current_data);
+
     let row_index = current_data
         .iter()
         .position(|row| row.get(0) == Some(uuid)) // Assume UUID is always in the first column
         .ok_or_else(|| {
-            std::io::Error::new(ErrorKind::NotFound, format!("Row with UUID '{}' not found", uuid))
+            Error::new(ErrorKind::NotFound, format!("Row with UUID '{}' not found", uuid))
         })?;
 
     // Merge existing row data with updated values
@@ -208,6 +224,22 @@ pub async fn update_row(
 
     // Recalculate the cache to reflect the updated state
     recalculate_row(state, table_name, uuid).await?;
+
+    let log_row = validated_row
+        .iter()
+        .map(|value| quote_if_needed(value))
+        .collect::<Vec<String>>();
+
+    state.change_logger.log_change(
+        None,
+        ChangeType::Update,
+        table_name.to_string(),
+        serde_json::json!({
+            "row_data": log_row
+        }),
+        None
+    )?;
+
 
     Ok(())
 }
@@ -270,6 +302,21 @@ pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<Ap
     writeln!(writer, "{}", serialized_row)?;
 
     recalculate_row(state, table_name, uuid).await?;
+
+    let log_row = deleted_row
+        .iter()
+        .map(|value| quote_if_needed(value))
+        .collect::<Vec<String>>();
+
+    state.change_logger.log_change(
+        None,
+        ChangeType::Delete,
+        table_name.to_string(),
+        serde_json::json!({
+            "row_data": log_row
+        }),
+        None
+    )?;
     Ok(())
 }
 

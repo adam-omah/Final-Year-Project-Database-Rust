@@ -43,6 +43,7 @@ pub enum ASTNode {
     Create {
         table: Identifier,
         columns: Vec<(Identifier, Identifier, Vec<String>)>},
+    Drop { table: Identifier },
 }
 
 #[derive(Deserialize, Serialize,Debug, Clone)]
@@ -93,6 +94,9 @@ pub fn sql_parser(query_bytes: &[u8]) -> Result<Vec<ASTNode>, String> {
             }
             "DELETE" => {
                 ast_nodes.push(parse_delete_clause(&mut tokens, &mut index)?);
+            }
+            "DROP" =>{
+                ast_nodes.push(parse_drop_clause(&mut tokens, &mut index)?);
             }
             _ => {
                 return Err(format!("Unexpected token: {}", tokens[index]));
@@ -536,6 +540,27 @@ fn parse_update_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
     }
 }
 
+fn parse_drop_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
+    // Check if next token is "TABLE"
+    *index += 1;
+    if *index >= tokens.len() || tokens[*index].to_uppercase() != "TABLE" {
+        return Err("Expected TABLE keyword after DROP".to_string());
+    }
+
+    *index += 1;
+    // Next token should be the table name
+    if *index >= tokens.len() {
+        return Err("Missing table name in DROP TABLE statement".to_string());
+    }
+
+    let table_name = tokens[*index].clone();
+    *index += 1;
+
+    Ok(ASTNode::Drop {
+        table: Identifier::Name(table_name)
+    })
+}
+
 
 
 #[cfg(test)]
@@ -781,5 +806,22 @@ mod parser_tests {
         let ast = sql_parser(query);
 
         assert!(ast.is_err()); // For now, let's err on complex unsupported syntax
+    }
+
+    #[test]
+    fn test_drop_table_statement() {
+        let query = b"DROP TABLE users";
+        let result = sql_parser(query);
+
+        assert!(result.is_ok());
+        let nodes = result.unwrap();
+
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            ASTNode::Drop { table } => {
+                assert_eq!(table, &Identifier::Name("users".to_string()));
+            }
+            _ => panic!("Expected Drop node"),
+        }
     }
 }

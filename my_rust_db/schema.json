@@ -1,5 +1,70 @@
 {
   "tables": {
+    "users_initial": {
+      "name": "users_initial",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": []
+        },
+        {
+          "name": "id",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "name",
+          "data_type": "String",
+          "rules": []
+        },
+        {
+          "name": "timestamp",
+          "data_type": "DateTime",
+          "rules": []
+        }
+      ]
+    },
+    "test_table_initial": {
+      "name": "test_table_initial",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
+        },
+        {
+          "name": "number",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "username",
+          "data_type": "String",
+          "rules": [
+            {
+              "constraint_type": "Unique",
+              "action": "Reject"
+            }
+          ]
+        },
+        {
+          "name": "timestamp",
+          "data_type": "DateTime",
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
+        }
+      ]
+    },
     "users_updates": {
       "name": "users_updates",
       "columns": [
@@ -62,71 +127,6 @@
               "action": "Reject"
             }
           ]
-        }
-      ]
-    },
-    "test_table_initial": {
-      "name": "test_table_initial",
-      "columns": [
-        {
-          "name": "UUID",
-          "data_type": "UUID",
-          "rules": [
-            {
-              "constraint_type": "NotNull",
-              "action": "Reject"
-            }
-          ]
-        },
-        {
-          "name": "number",
-          "data_type": "Int",
-          "rules": []
-        },
-        {
-          "name": "username",
-          "data_type": "String",
-          "rules": [
-            {
-              "constraint_type": "Unique",
-              "action": "Reject"
-            }
-          ]
-        },
-        {
-          "name": "timestamp",
-          "data_type": "DateTime",
-          "rules": [
-            {
-              "constraint_type": "NotNull",
-              "action": "Reject"
-            }
-          ]
-        }
-      ]
-    },
-    "users_initial": {
-      "name": "users_initial",
-      "columns": [
-        {
-          "name": "UUID",
-          "data_type": "UUID",
-          "rules": []
-        },
-        {
-          "name": "id",
-          "data_type": "Int",
-          "rules": []
-        },
-        {
-          "name": "name",
-          "data_type": "String",
-          "rules": []
-        },
-        {
-          "name": "timestamp",
-          "data_type": "DateTime",
-          "rules": []
         }
       ]
     }

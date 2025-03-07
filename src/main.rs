@@ -15,13 +15,15 @@ use schema::{
     schema::load_schema,
     schema::Schema,
 };
+use crate::change_logging::change_logging::ChangeLogger;
 
 // Module Imports.
 pub mod config;
 pub mod schema;
 pub mod records;
 pub mod query;
-mod executer;
+pub mod executer;
+pub mod change_logging;
 
 
 // public constants
@@ -34,6 +36,7 @@ pub struct AppState {
     pub schema: Arc<Mutex<Schema>>,
     pub config: DatabaseConfig,
     pub cache: Arc<Mutex<BTreeMap<String, Vec<Vec<String>>>>>, // Cache holds up-to-date data.
+    pub change_logger: ChangeLogger,
 }
 
 fn init_database(config: &DatabaseConfig) -> Result<()> {
@@ -71,6 +74,9 @@ async fn main() -> std::io::Result<()> {
         .parse()
         .expect("Invalid port number");
 
+    //log directory
+    let log_directory = config.db_dir.clone();
+
     // Initialize the database
     init_database(&config).expect("Failed to initialize database");
 
@@ -79,6 +85,7 @@ async fn main() -> std::io::Result<()> {
         schema: schema.clone(),
         config: config.clone(),
         cache: cache.clone(),
+        change_logger: ChangeLogger::new(log_directory.clone()),
     };
 
 
@@ -152,6 +159,7 @@ mod app_tests {
             schema: schema.clone(),
             config: test_config.clone(),
             cache: cache.clone(),
+            change_logger: ChangeLogger::new(test_config.db_dir.clone()),
         });
 
         if !schema.lock().unwrap().tables.contains_key("users") {
@@ -226,6 +234,7 @@ mod app_tests {
             schema: schema.clone(),
             config: test_config.clone(),
             cache: Arc::new(Mutex::new(BTreeMap::new())),
+            change_logger: ChangeLogger::new(test_config.db_dir.clone()),
         });
 
         // Initialize Actix Web app
@@ -279,6 +288,7 @@ mod app_tests {
             schema: schema.clone(),
             config: test_config.clone(),
             cache: cache.clone(),
+            change_logger: ChangeLogger::new(test_config.db_dir.clone()),
         });
 
         let app = test::init_service(
@@ -317,6 +327,7 @@ mod app_tests {
             schema: schema.clone(),
             config: test_config.clone(),
             cache: cache.clone(),
+            change_logger: ChangeLogger::new(test_config.db_dir.clone()),
         });
 
         let app = test::init_service(

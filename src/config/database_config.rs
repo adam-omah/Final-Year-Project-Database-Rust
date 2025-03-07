@@ -12,6 +12,7 @@ pub struct DatabaseConfig {
     pub schema_file: PathBuf,
     pub table_dir: PathBuf,
     pub database_name: String,
+    pub log_dir: PathBuf,
 }
 
 impl Default for DatabaseConfig {
@@ -20,8 +21,9 @@ impl Default for DatabaseConfig {
             db_dir: PathBuf::from(DB_DIR),
             schema_file: PathBuf::from(SCHEMA_FILE),
             table_dir: PathBuf::from(TABLE_DIR),
-            database_name: std::env::var("DATABASE_NAME")
+            database_name: env::var("DATABASE_NAME")
                 .unwrap_or_else(|_| "my_rust_db".to_string()),
+            log_dir: PathBuf::from("logs"),
         }
     }
 }

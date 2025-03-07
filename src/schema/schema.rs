@@ -8,8 +8,9 @@ use actix_web::web;
 use tracing::log::debug;
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
-use chrono::NaiveDateTime;
+use chrono::{NaiveDateTime, Utc};
 use regex::Regex;
+use crate::change_logging::change_logging::{ChangeLogger, ChangeType};
 use crate::executer::executer::evaluate_where_clause;
 use crate::query::parser::{Expression, Identifier};
 use crate::records::table::{get_column_values};
@@ -188,7 +189,12 @@ pub fn save_schema(schema: &Schema, config: &DatabaseConfig) -> Result<()> {
 }
 
 
-pub fn create_table(schema: &mut Schema, table: Table, config: &DatabaseConfig) -> Result<()> {
+pub fn create_table(
+    schema: &mut Schema,
+    table: Table,
+    config: &DatabaseConfig,
+    change_logger: &ChangeLogger
+    ) -> Result<()> {
     let initial_table_name = format!("{}_initial", table.name);
     let updates_table_name = format!("{}_updates", table.name);
 
@@ -197,7 +203,7 @@ pub fn create_table(schema: &mut Schema, table: Table, config: &DatabaseConfig) 
     initial_table.name = initial_table_name.clone();
 
     // Create the updates table (using the original 'table' by moving ownership)
-    let mut updates_table = table; // Move ownership to avoid another clone
+    let mut updates_table = table.clone(); // Move ownership to avoid another clone
     updates_table.name = updates_table_name.clone();
 
     // The UUID column definition (same for both initial and updates tables)
@@ -246,10 +252,67 @@ pub fn create_table(schema: &mut Schema, table: Table, config: &DatabaseConfig) 
     if !updates_table_path.exists() {
         std::fs::File::create(updates_table_path)?;
     }
-
+    change_logger.log_change(
+        None,
+        ChangeType::Create,
+        table.name.clone(),
+        serde_json::json!({
+            "columns": table.columns.iter().map(|col| serde_json::json!({
+                "name": col.name,
+                "data_type": col.data_type,
+                "rules": col.rules
+            })).collect::<Vec<_>>(),
+            "timestamp": Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+        }),
+        None
+    )?;
     Ok(())
 }
 
+pub fn drop_table(
+    schema: &mut Schema,
+    table_name: &str,
+    config: &DatabaseConfig,
+    change_logger: &ChangeLogger
+) -> Result<()> {
+    // Create variants for initial and updates tables
+    let initial_table = format!("{}_initial", table_name);
+    let updates_table = format!("{}_updates", table_name);
+
+    // Remove tables from schema
+    schema.tables.remove(&initial_table);
+    schema.tables.remove(&updates_table);
+
+    // Save the updated schema
+    save_schema(schema, config)?;
+
+    // Delete corresponding table files
+    let initial_file_path = config.db_dir.join(&config.table_dir).join(&initial_table);
+    let updates_file_path = config.db_dir.join(&config.table_dir).join(&updates_table);
+
+    // Remove table files if they exist
+    if initial_file_path.exists() {
+        std::fs::remove_file(&initial_file_path)?;
+    }
+
+    if updates_file_path.exists() {
+        std::fs::remove_file(&updates_file_path)?;
+    }
+
+    // Log the table drop operation
+    change_logger.log_change(
+        None,
+        ChangeType::Drop,
+        table_name.to_string(),
+        serde_json::json!({
+            "dropped_tables": [initial_table, updates_table],
+            "timestamp": Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        }),
+        None
+    )?;
+
+    Ok(())
+}
 
 
 pub async fn check_column_rules(
@@ -468,7 +531,11 @@ mod schema_tests {
             db_dir: PathBuf::from("test_db"),
             schema_file: "schema.json".to_string().parse().unwrap(),
             table_dir: "tables".to_string().parse().unwrap(),
+            database_name: "".to_string(),
+            log_dir: Default::default(),
         };
+
+        let change_logger = ChangeLogger::new("test_logs");
 
         // Create test directories
         std::fs::create_dir_all(config.db_dir.join(&config.table_dir))?;
@@ -484,7 +551,7 @@ mod schema_tests {
             ],
         };
 
-        create_table(&mut schema, table, &config)?;
+        create_table(&mut schema, table, &config, &change_logger)?;
 
         // Verify both initial and updates tables were created
         assert!(schema.tables.contains_key("test_table_initial"));

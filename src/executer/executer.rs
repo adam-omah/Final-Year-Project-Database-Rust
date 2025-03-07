@@ -3,12 +3,13 @@ use std::path::Path;
 use crate::query::parser::{sql_parser, ASTNode, Expression, Identifier};
 use crate::records::table::{create_table, delete_row, get_table_at_timestamp, get_table_data, insert_row, load_table_data_from_file, recalculate_table, update_row};
 use crate::schema::schema;
-use crate::schema::schema::{get_column_names_from_schema};
+use crate::schema::schema::{drop_table, get_column_names_from_schema};
 use crate::{AppState};
 use actix_web::{post, web, HttpRequest, HttpResponse};
 use tracing::log::{debug, info};
 use uuid::Uuid;
 use regex::Regex;
+use serde_json::json;
 use crate::records::table::extract_literal_value;
 
 pub async fn execute_query(
@@ -43,6 +44,9 @@ pub async fn execute_query(
             }
             ASTNode::Delete { table } => {
                 return handle_delete(table, &data, &where_clause).await;
+            }
+            ASTNode::Drop { table } => {
+                return handle_drop(&table, &data).await;
             }
             _ => {
                 return HttpResponse::BadRequest().json(serde_json::json!({"error": "Unsupported AST Node type"}));
@@ -149,6 +153,46 @@ fn handle_create_table(
         HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid table name in CREATE TABLE"}))
     }
 }
+
+async fn handle_drop(
+    table: &Identifier,
+    data: &web::Data<AppState>
+) -> HttpResponse {
+    // Extract the table name
+    let table_name = match table {
+        Identifier::Name(name) => name,
+        _ => {
+            return HttpResponse::BadRequest().json(json!({
+                "error": "Invalid table name"
+            }))
+        }
+    };
+
+    // Acquire a lock on the schema
+    let mut schema = match data.schema.lock() {
+        Ok(mut schema) => schema,
+        Err(_) => {
+            return HttpResponse::InternalServerError().json(json!({
+                "error": "Could not acquire schema lock"
+            }))
+        }
+    };
+
+    // Attempt to drop the table
+    match drop_table(&mut schema, table_name, &data.config, &data.change_logger) {
+        Ok(_) => {
+            HttpResponse::Ok().json(json!({
+                "message": format!("Table {} dropped successfully", table_name)
+            }))
+        }
+        Err(e) => {
+            HttpResponse::InternalServerError().json(json!({
+                "error": format!("Failed to drop table: {}", e)
+            }))
+        }
+    }
+}
+
 
 async fn handle_insert(
     table: &Identifier,
@@ -276,12 +320,15 @@ async fn handle_update(
         match load_table_data_from_file(&initial_table_path) {
             Ok(initial_data) => {
                 let column_names = get_column_names_from_schema(data, table_name).unwrap_or_default();
+                info!("initial_data: {:?}", initial_data);
 
                 // Filter rows based on the WHERE clause
                 let filtered_rows: Vec<_> = initial_data
                     .iter()
                     .filter(|row| evaluate_where_clause(condition, row, &column_names))
                     .collect();
+
+                info!("Filtered rows: {:?}", filtered_rows);
 
                 if filtered_rows.is_empty() {
                     return HttpResponse::NotFound().json(serde_json::json!({"error": "No rows matched the specified condition"}));
@@ -436,6 +483,8 @@ pub fn evaluate_where_clause(
             // Trim quotes to normalize comparison
             left_val = left_val.trim_matches('"').to_string();
             right_val = right_val.trim_matches('"').to_string();
+
+            info!("Evaluating where clause: {} {} {}", left_val, operator, right_val);
 
             // Perform evaluation based on the operator
             match operator.as_str() {

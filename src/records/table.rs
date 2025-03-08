@@ -138,7 +138,8 @@ pub async fn insert_row(
         serde_json::json!({
             "row_data": cache_row.clone()
         }),
-        None
+        None,
+        Option::from(state.config.database_name.clone())
     )?;
     Ok(())
 }
@@ -237,7 +238,8 @@ pub async fn update_row(
         serde_json::json!({
             "row_data": log_row
         }),
-        None
+        None,
+        Option::from(state.config.database_name.clone())
     )?;
 
 
@@ -315,7 +317,8 @@ pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<Ap
         serde_json::json!({
             "row_data": log_row
         }),
-        None
+        None,
+        Option::from(state.config.database_name.clone())
     )?;
     Ok(())
 }

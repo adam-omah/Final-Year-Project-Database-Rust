@@ -264,7 +264,8 @@ pub fn create_table(
             })).collect::<Vec<_>>(),
             "timestamp": Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
         }),
-        None
+        None,
+        Option::from(config.database_name.clone())
     )?;
     Ok(())
 }
@@ -308,7 +309,8 @@ pub fn drop_table(
             "dropped_tables": [initial_table, updates_table],
             "timestamp": Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         }),
-        None
+        None,
+        Option::from(config.database_name.clone())
     )?;
 
     Ok(())
@@ -333,7 +335,7 @@ pub async fn check_column_rules(
                         RuleAction::SetDefault(default_value) => final_value = Some(default_value.clone()),
                         RuleAction::Reject => {
                             return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
+                                ErrorKind::InvalidData,
                                 "NotNull constraint violated",
                             ));
                         }
@@ -348,7 +350,7 @@ pub async fn check_column_rules(
                         RuleAction::SetDefault(default_value) => final_value = Some(default_value.clone()),
                         RuleAction::Reject => {
                             return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
+                                ErrorKind::InvalidData,
                                 format!("Unique constraint violated for column '{}', Value '{}' already exists in table.", column.name, value),
                             ));
                         }
@@ -367,7 +369,7 @@ pub async fn check_column_rules(
                         RuleAction::SetDefault(default_value) => final_value = Some(default_value.clone()),
                         RuleAction::Reject => {
                             return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
+                                ErrorKind::InvalidData,
                                 format!(
                                     "Check constraint violated for column '{}'. Expression {:?} does not hold.",
                                     column.name, expression
@@ -420,7 +422,7 @@ pub fn get_column_names_from_schema(
         None => {
             let not_found_msg = format!("Table '{}' or '{}_initial' not found", table_name, table_name);
             Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
+                ErrorKind::NotFound,
                 not_found_msg,
             ))
         }

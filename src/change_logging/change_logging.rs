@@ -23,7 +23,8 @@ pub struct ChangeLogEntry {
     pub change_type: ChangeType,
     pub table_name: String,
     pub data: serde_json::Value,
-    pub user: Option<String>, // Optional user identifier
+    pub user: Option<String>,
+    pub origin_db: Option<String>,
 }
 
 /// Change Logger struct to manage logging operations
@@ -65,7 +66,8 @@ impl ChangeLogger {
         change_type: ChangeType,
         table_name: String,
         data: serde_json::Value,
-        user: Option<String>
+        user: Option<String>,
+        origin_db: Option<String>,
     ) -> IoResult<()> {
         // Create a log entry, using the provided change_id or generating a new one
         let log_entry = ChangeLogEntry {
@@ -74,6 +76,7 @@ impl ChangeLogger {
             table_name,
             data,
             user,
+            origin_db,
         };
 
         // Serialize the log entry to JSON
@@ -126,9 +129,11 @@ pub fn log_database_change(
     change_logger: &ChangeLogger,
     change_type: ChangeType,
     table_name: String,
-    data: serde_json::Value
+    data: serde_json::Value,
+    user: Option<String>,
+    origin_db: Option<String>,
 ) {
-    if let Err(e) = change_logger.log_change(change_id,change_type, table_name, data, None) {
+    if let Err(e) = change_logger.log_change(change_id,change_type, table_name, data, user, origin_db) {
         tracing::error!("Failed to log change: {}", e);
     }
 }

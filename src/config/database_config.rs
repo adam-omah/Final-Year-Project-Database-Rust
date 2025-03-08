@@ -13,6 +13,7 @@ pub struct DatabaseConfig {
     pub table_dir: PathBuf,
     pub database_name: String,
     pub log_dir: PathBuf,
+    pub log_file: String,
 }
 
 impl Default for DatabaseConfig {
@@ -24,6 +25,7 @@ impl Default for DatabaseConfig {
             database_name: env::var("DATABASE_NAME")
                 .unwrap_or_else(|_| "my_rust_db".to_string()),
             log_dir: PathBuf::from("logs"),
+            log_file: "change_log.json".to_string(),
         }
     }
 }
@@ -33,12 +35,10 @@ impl DatabaseConfig {
         // Try multiple potential paths
         for &path in paths {
             if let Ok(file) = File::open(path) {
-                info!("Found configuration file at {}", path);
                 let mut contents = String::new();
                 let mut reader = std::io::BufReader::new(file);
                 if reader.read_to_string(&mut contents).is_ok() {
                     let mut config: DatabaseConfig = serde_yaml::from_str(&contents)?;
-                    info!("Loaded configuration '{:#?}'",config);
                     // Override database_name and hostname from environment variable
                     config.database_name = std::env::var("DATABASE_NAME").unwrap_or_else(|_| config.database_name.clone());
 

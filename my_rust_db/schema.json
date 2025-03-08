@@ -1,47 +1,32 @@
 {
   "tables": {
-    "test_table_initial": {
-      "name": "test_table_initial",
+    "users_updates": {
+      "name": "users_updates",
       "columns": [
         {
           "name": "UUID",
           "data_type": "UUID",
-          "rules": [
-            {
-              "constraint_type": "NotNull",
-              "action": "Reject"
-            }
-          ]
+          "rules": []
         },
         {
-          "name": "number",
+          "name": "id",
           "data_type": "Int",
           "rules": []
         },
         {
-          "name": "username",
+          "name": "name",
           "data_type": "String",
-          "rules": [
-            {
-              "constraint_type": "Unique",
-              "action": "Reject"
-            }
-          ]
+          "rules": []
         },
         {
           "name": "timestamp",
           "data_type": "DateTime",
-          "rules": [
-            {
-              "constraint_type": "NotNull",
-              "action": "Reject"
-            }
-          ]
+          "rules": []
         }
       ]
     },
-    "test_table_updates": {
-      "name": "test_table_updates",
+    "test_table_initial": {
+      "name": "test_table_initial",
       "columns": [
         {
           "name": "UUID",
@@ -105,28 +90,43 @@
         }
       ]
     },
-    "users_updates": {
-      "name": "users_updates",
+    "test_table_updates": {
+      "name": "test_table_updates",
       "columns": [
         {
           "name": "UUID",
           "data_type": "UUID",
-          "rules": []
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
         },
         {
-          "name": "id",
+          "name": "number",
           "data_type": "Int",
           "rules": []
         },
         {
-          "name": "name",
+          "name": "username",
           "data_type": "String",
-          "rules": []
+          "rules": [
+            {
+              "constraint_type": "Unique",
+              "action": "Reject"
+            }
+          ]
         },
         {
           "name": "timestamp",
           "data_type": "DateTime",
-          "rules": []
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
         }
       ]
     }

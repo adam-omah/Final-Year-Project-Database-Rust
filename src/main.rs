@@ -16,6 +16,7 @@ use schema::{
     schema::Schema,
 };
 use crate::change_logging::change_logging::ChangeLogger;
+use crate::recovery::recovery::{configure_recovery_routes, trigger_log_recovery, trigger_specific_table_recovery, LogRecoveryManager};
 
 // Module Imports.
 pub mod config;
@@ -24,7 +25,7 @@ pub mod records;
 pub mod query;
 pub mod executer;
 pub mod change_logging;
-
+mod recovery;
 
 // public constants
 pub const DB_DIR: &str = "my_rust_db";
@@ -37,6 +38,7 @@ pub struct AppState {
     pub config: DatabaseConfig,
     pub cache: Arc<Mutex<BTreeMap<String, Vec<Vec<String>>>>>, // Cache holds up-to-date data.
     pub change_logger: ChangeLogger,
+    pub log_recovery_manager: LogRecoveryManager
 }
 
 fn init_database(config: &DatabaseConfig) -> Result<()> {
@@ -76,6 +78,8 @@ async fn main() -> std::io::Result<()> {
 
     //log directory
     let log_directory = config.log_dir.clone();
+    let log_file = config.log_file.clone();
+    let log_recovery_manager = LogRecoveryManager::new(config.clone());
 
     // Initialize the database
     init_database(&config).expect("Failed to initialize database");
@@ -85,7 +89,8 @@ async fn main() -> std::io::Result<()> {
         schema: schema.clone(),
         config: config.clone(),
         cache: cache.clone(),
-        change_logger: ChangeLogger::new(log_directory.clone()),
+        change_logger: ChangeLogger::new(log_directory.clone(), log_file.clone()),
+        log_recovery_manager: log_recovery_manager.clone(),
     };
 
 
@@ -99,7 +104,8 @@ async fn main() -> std::io::Result<()> {
             .service(get_table_at_timestamp_api)  // Updated API for fetching table data at a specific timestamp
             .service(list_tables_api)             // Updated API for listing all tables
             .service(execute_query_endpoint)
-            .service(get_column_names_api)// Existing route unchanged
+            .service(get_column_names_api)
+            .configure(configure_recovery_routes)
             // Static file serving
             .service(Files::new("/static", "./static").show_files_listing())
             // Route for `/tables` -> `tables.html`
@@ -154,12 +160,15 @@ mod app_tests {
         init_database(&test_config)?;
         let schema = Arc::new(Mutex::new(load_schema(&test_config)?));
         let cache = Arc::new(Mutex::new(BTreeMap::new()));
+        let log_recovery_manager = LogRecoveryManager::new(test_config.clone());
+
         // Create a test application with your route
         let app_state = web::Data::new(AppState {
             schema: schema.clone(),
             config: test_config.clone(),
             cache: cache.clone(),
-            change_logger: ChangeLogger::new(test_config.db_dir.clone()),
+            change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
+            log_recovery_manager: log_recovery_manager.clone(),
         });
 
         if !schema.lock().unwrap().tables.contains_key("users") {
@@ -230,11 +239,15 @@ mod app_tests {
         init_database(&test_config)?;
 
         let schema = Arc::new(Mutex::new(load_schema(&test_config)?));
+        let log_directory = test_config.log_dir.clone();
+        let log_recovery_manager = LogRecoveryManager::new(test_config.clone());
+
         let app_state = web::Data::new(AppState {
             schema: schema.clone(),
             config: test_config.clone(),
             cache: Arc::new(Mutex::new(BTreeMap::new())),
-            change_logger: ChangeLogger::new(test_config.db_dir.clone()),
+            change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
+            log_recovery_manager: log_recovery_manager.clone(),
         });
 
         // Initialize Actix Web app
@@ -283,12 +296,16 @@ mod app_tests {
         init_database(&test_config)?;
         let schema = Arc::new(Mutex::new(load_schema(&test_config)?));
         let cache = Arc::new(Mutex::new(BTreeMap::new()));
+        let log_directory = test_config.log_dir.clone();
+        let log_recovery_manager = LogRecoveryManager::new(test_config.clone());
+
         // Create a test application with your route
         let app_state = web::Data::new(AppState {
             schema: schema.clone(),
             config: test_config.clone(),
             cache: cache.clone(),
-            change_logger: ChangeLogger::new(test_config.db_dir.clone()),
+            change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
+            log_recovery_manager: log_recovery_manager.clone(),
         });
 
         let app = test::init_service(
@@ -323,11 +340,15 @@ mod app_tests {
         init_database(&test_config)?;
         let schema = Arc::new(Mutex::new(load_schema(&test_config)?));
         let cache = Arc::new(Mutex::new(BTreeMap::new()));
+        let log_directory = test_config.log_dir.clone();
+        let log_recovery_manager = LogRecoveryManager::new(test_config.clone());
+
         let app_state = web::Data::new(AppState {
             schema: schema.clone(),
             config: test_config.clone(),
             cache: cache.clone(),
-            change_logger: ChangeLogger::new(test_config.db_dir.clone()),
+            change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
+            log_recovery_manager: log_recovery_manager.clone(),
         });
 
         let app = test::init_service(

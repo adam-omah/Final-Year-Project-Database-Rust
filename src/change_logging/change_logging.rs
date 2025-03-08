@@ -30,34 +30,21 @@ pub struct ChangeLogEntry {
 /// Change Logger struct to manage logging operations
 #[derive(Clone)]
 pub struct ChangeLogger {
-    log_file_path: PathBuf,
+    log_directory: PathBuf,
+    log_file: String,
 }
 
 impl ChangeLogger {
     /// Create a new ChangeLogger instance
-    pub fn new(log_directory: impl AsRef<Path>) -> Self {
+    pub fn new(log_directory: impl AsRef<Path>, log_file: String) -> Self {
         // Ensure the log directory exists
         std::fs::create_dir_all(&log_directory).expect("Could not create log directory");
 
-        let log_file_path = log_directory.as_ref().join("change_log.json");
-
         ChangeLogger {
-            log_file_path,
+            log_directory: log_directory.as_ref().to_path_buf(),
+            log_file: log_file.clone(),
         }
     }
-
-    /// Alternative constructor that allows more flexible path creation
-    pub fn with_custom_path(log_file_path: PathBuf) -> Self {
-        // Ensure the parent directory exists
-        if let Some(parent) = log_file_path.parent() {
-            std::fs::create_dir_all(parent).expect("Could not create log directory");
-        }
-
-        ChangeLogger {
-            log_file_path,
-        }
-    }
-
 
     /// Log a change to the log file
     pub fn log_change(
@@ -87,7 +74,7 @@ impl ChangeLogger {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.log_file_path)?;
+            .open(&self.log_directory.join(&self.log_file))?;
 
         // Write the JSON log entry with a newline
         writeln!(file, "{}", log_entry_json)?;
@@ -98,7 +85,7 @@ impl ChangeLogger {
     pub fn read_recent_logs(&self, limit: usize) -> IoResult<Vec<ChangeLogEntry>> {
         use std::io::{BufRead, BufReader};
 
-        let file = File::open(&self.log_file_path)?;
+        let file = File::open(&self.log_directory.join(&self.log_file))?;
         let reader = BufReader::new(file);
 
         let mut all_logs: Vec<ChangeLogEntry> = Vec::new();
@@ -118,8 +105,8 @@ impl ChangeLogger {
         Ok(all_logs)
     }
 
-    pub fn log_file_path(&self) -> &PathBuf {
-        &self.log_file_path
+    pub fn log_file_path(&self) -> PathBuf {
+        self.log_directory.join(&self.log_file)
     }
 }
 

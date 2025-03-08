@@ -80,18 +80,19 @@ async fn handle_select(
                         Ok(names) => names,
                         Err(_) => { return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Error fetching column names"})) }
                     };
-
                     table_data = table_data
                         .into_iter()
-                        .filter(|row| evaluate_where_clause(condition, row, &column_names))
+                        .filter(|row| row == &column_names ||
+                            evaluate_where_clause(condition, row, &column_names)
+                        )
                         .collect();
                 }
 
                 // Process the SELECT query
-                let result = process_select(columns, &table_data, data.clone(), table_name, where_clause).await;
+                let result = process_select(columns, &table_data, data.clone(), table_name).await;
 
-                if result.is_empty() {
-                    HttpResponse::Ok().json(serde_json::json!({ "message": "No rows found" }))
+                if result.len() <= 1 {
+                    HttpResponse::Ok().json(serde_json::json!({ "message": "No matching rows found" }))
                 } else {
                     match serde_json::to_string(&result) {
                         Ok(json) => HttpResponse::Ok().json(serde_json::from_str::<serde_json::Value>(&json).unwrap()),
@@ -386,7 +387,6 @@ async fn process_select(
     table_data: &[Vec<String>],
     data: web::Data<AppState>,
     table_name: &String,
-    _where_clause: Option<Expression>,
 ) -> Vec<Vec<serde_json::Value>> {
     let mut result = Vec::new();
 

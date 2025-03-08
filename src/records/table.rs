@@ -1,5 +1,4 @@
 // Table.rs
-
 use crate::schema::{schema::create_table as schema_create_table, schema::Table};
 use crate::AppState;
 use actix_web::{get, web, HttpResponse, Responder};
@@ -330,14 +329,19 @@ pub fn get_table_data(
     table_name: &str,
 ) -> BoxFuture<Result<Vec<Vec<String>>>> {
     Box::pin(async move {
+        // Retrieve column names
+        let column_names = get_column_names(table_name, &state).await?;
+
         // Attempt to get from cache (using a shorter lock scope)
         {
             let cache = state.cache.lock().unwrap();
             if let Some(cached_data) = cache.get(table_name) {
-                return Ok(cached_data.clone());
+                // If data is found in cache, prepend column names
+                let mut result = cached_data.clone();
+                result.insert(0, column_names);
+                return Ok(result);
             }
         }
-
 
         let initial_table_name = format!("{}_initial", table_name);
         let initial_table_path = Path::new(&state.config.db_dir)
@@ -345,15 +349,23 @@ pub fn get_table_data(
             .join(&initial_table_name);
 
         let initial_data = load_table_data_from_file(&initial_table_path)?;
-        recalculate_table(&state, table_name, initial_data.clone()).await?;  //Pass initial_data
+        recalculate_table(&state, table_name, initial_data.clone()).await?;  // Pass initial_data
+
         // Now, the cache *should* have the updated data
         let cache = state.cache.lock().unwrap();
-        cache
+        let cached_data = cache
             .get(table_name)
             .cloned()
-            .ok_or_else(|| Error::new(ErrorKind::Other, "Data not found in cache after recalculation"))
+            .ok_or_else(|| Error::new(ErrorKind::Other, "Data not found in cache after recalculation"))?;
+
+        // Prepend column names to the cached data
+        let mut result = cached_data.clone();
+        result.insert(0, column_names);
+
+        Ok(result)
     })
 }
+
 
 
 
@@ -722,6 +734,8 @@ pub async fn get_table_at_timestamp(
     table_name: &String,
     timestamp: String,
 ) -> Result<Vec<Vec<String>>> {
+    let column_names = get_column_names(table_name, &state).await?;
+
     let initial_table_name = format!("{}_initial", table_name);
     let updates_table_name = format!("{}_updates", table_name);
 
@@ -775,7 +789,12 @@ pub async fn get_table_at_timestamp(
     };
 
     // Merge the filtered initial and updates data
-    let merged_data = merge_table_and_update(initial_data, updates_data);
+    let mut merged_data = merge_table_and_update(initial_data, updates_data);
+
+    // Prepend column names if the merged data is not empty
+    if !merged_data.is_empty() {
+        merged_data.insert(0, column_names);
+    }
 
     Ok(merged_data)
 }

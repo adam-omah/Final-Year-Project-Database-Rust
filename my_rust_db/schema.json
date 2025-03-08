@@ -1,30 +1,5 @@
 {
   "tables": {
-    "users_initial": {
-      "name": "users_initial",
-      "columns": [
-        {
-          "name": "UUID",
-          "data_type": "UUID",
-          "rules": []
-        },
-        {
-          "name": "id",
-          "data_type": "Int",
-          "rules": []
-        },
-        {
-          "name": "name",
-          "data_type": "String",
-          "rules": []
-        },
-        {
-          "name": "timestamp",
-          "data_type": "DateTime",
-          "rules": []
-        }
-      ]
-    },
     "test_table_initial": {
       "name": "test_table_initial",
       "columns": [
@@ -65,31 +40,6 @@
         }
       ]
     },
-    "users_updates": {
-      "name": "users_updates",
-      "columns": [
-        {
-          "name": "UUID",
-          "data_type": "UUID",
-          "rules": []
-        },
-        {
-          "name": "id",
-          "data_type": "Int",
-          "rules": []
-        },
-        {
-          "name": "name",
-          "data_type": "String",
-          "rules": []
-        },
-        {
-          "name": "timestamp",
-          "data_type": "DateTime",
-          "rules": []
-        }
-      ]
-    },
     "test_table_updates": {
       "name": "test_table_updates",
       "columns": [
@@ -127,6 +77,56 @@
               "action": "Reject"
             }
           ]
+        }
+      ]
+    },
+    "users_initial": {
+      "name": "users_initial",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": []
+        },
+        {
+          "name": "id",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "name",
+          "data_type": "String",
+          "rules": []
+        },
+        {
+          "name": "timestamp",
+          "data_type": "DateTime",
+          "rules": []
+        }
+      ]
+    },
+    "users_updates": {
+      "name": "users_updates",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": []
+        },
+        {
+          "name": "id",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "name",
+          "data_type": "String",
+          "rules": []
+        },
+        {
+          "name": "timestamp",
+          "data_type": "DateTime",
+          "rules": []
         }
       ]
     }

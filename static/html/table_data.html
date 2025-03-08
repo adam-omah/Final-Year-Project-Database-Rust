@@ -71,20 +71,17 @@
      */
     async function fetchTableData() {
         try {
-            // Fetch the column names first
-            const columnNames = await fetchColumnNames();
-
-            // Now fetch the table data
+            // Fetch the table data
             const response = await fetch(`/api/tables/${tableName}`);
             if (!response.ok) {
                 throw new Error(`Failed to fetch table data: ${response.statusText}`);
             }
             const tableData = await response.json();
-            if (tableData.length === 0) {
+            if (tableData.length <= 1) {
                 throw new Error('No data in this table.');
             }
 
-            // Populate the table with the fetched column names and data
+            // Populate the table with the fetched data
             const tableHead = document.getElementById('table-head');
             const tableBody = document.getElementById('table-body');
             const resultTable = document.getElementById('result-table');
@@ -93,7 +90,8 @@
             tableHead.innerHTML = '';
             tableBody.innerHTML = '';
 
-            // Add table headers
+            // First row contains column names (headers)
+            const columnNames = tableData[0];
             const headerRow = document.createElement('tr');
             columnNames.forEach(columnName => {
                 const th = document.createElement('th');
@@ -102,23 +100,25 @@
             });
             tableHead.appendChild(headerRow);
 
-            // Add table rows (map indices in row data to column names)
-            tableData.forEach(row => {
+            // Add table rows (skip the first row which contains headers)
+            tableData.slice(1).forEach(row => {
                 const rowElement = document.createElement('tr');
-                columnNames.forEach((_, index) => {
+                row.forEach(cellValue => {
                     const td = document.createElement('td');
-                    td.textContent = row[index] ?? 'NULL'; // Match column index to row value
+                    td.textContent = cellValue;
                     rowElement.appendChild(td);
                 });
                 tableBody.appendChild(rowElement);
             });
 
-            // Display the table
+            // Show the table
             resultTable.style.display = 'table';
+            document.getElementById('error-message').style.display = 'none';
         } catch (error) {
             const errorMessageDiv = document.getElementById('error-message');
             errorMessageDiv.style.display = 'block';
             errorMessageDiv.textContent = `Error: ${error.message}`;
+            document.getElementById('result-table').style.display = 'none';
         }
     }
 
@@ -160,20 +160,20 @@
             if (result.message) {
                 errorMessageDiv.style.display = 'block';
                 errorMessageDiv.textContent = result.message; // Display the message
-                await fetchTableData();
-                return; // No further processing needed
-            }
-
-            // If the result is an array (assumed table rows), process it
-            if (!Array.isArray(result) || result.length === 0) {
-                errorMessageDiv.style.display = 'block';
-                errorMessageDiv.textContent = 'Query returned no results.';
-                await fetchTableData();
+                await fetchTableData(); // Restore original table data
                 return;
             }
 
-            // Generate table headers from first row keys
-            const headers = Object.keys(result[0] || {});
+            // If the result is an array (assumed table rows), process it
+            if (!Array.isArray(result) || result.length <= 1) {
+                errorMessageDiv.style.display = 'block';
+                errorMessageDiv.textContent = 'Query returned no results.';
+                await fetchTableData(); // Restore original table data
+                return;
+            }
+
+            // Use first row as headers
+            const headers = result[0];
             const headerRow = document.createElement('tr');
             headers.forEach(header => {
                 const th = document.createElement('th');
@@ -182,18 +182,16 @@
             });
             tableHead.appendChild(headerRow);
 
-            // Generate table rows
-            result.forEach(row => {
+            // Generate table rows (skip first row)
+            result.slice(1).forEach(row => {
                 const rowElement = document.createElement('tr');
-                headers.forEach(header => {
+                row.forEach(cellValue => {
                     const td = document.createElement('td');
-                    td.textContent = row[header] ?? 'NULL';
+                    td.textContent = cellValue;
                     rowElement.appendChild(td);
                 });
                 tableBody.appendChild(rowElement);
             });
-
-
 
             // Show results
             resultTable.style.display = 'table';

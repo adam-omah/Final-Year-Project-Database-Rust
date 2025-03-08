@@ -68,14 +68,14 @@
             }
 
             // If the result is an array (assumed table rows), process it
-            if (!Array.isArray(result) || result.length === 0) {
+            if (!Array.isArray(result) || result.length <= 1) {
                 errorMessageDiv.style.display = 'block';
                 errorMessageDiv.textContent = 'Query returned no results.';
                 return;
             }
 
-            // Generate table headers from first row keys
-            const headers = Object.keys(result[0] || {});
+            // Use first row as headers
+            const headers = result[0];
             const headerRow = document.createElement('tr');
             headers.forEach(header => {
                 const th = document.createElement('th');
@@ -84,12 +84,12 @@
             });
             tableHead.appendChild(headerRow);
 
-            // Generate table rows
-            result.forEach(row => {
+            // Generate table rows (skip first row)
+            result.slice(1).forEach(row => {
                 const rowElement = document.createElement('tr');
-                headers.forEach(header => {
+                row.forEach(cellValue => {
                     const td = document.createElement('td');
-                    td.textContent = row[header] ?? 'NULL';
+                    td.textContent = cellValue;
                     rowElement.appendChild(td);
                 });
                 tableBody.appendChild(rowElement);

@@ -75,7 +75,7 @@ async fn main() -> std::io::Result<()> {
         .expect("Invalid port number");
 
     //log directory
-    let log_directory = config.db_dir.clone();
+    let log_directory = config.log_dir.clone();
 
     // Initialize the database
     init_database(&config).expect("Failed to initialize database");

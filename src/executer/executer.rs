@@ -390,7 +390,7 @@ async fn process_select(
 ) -> Vec<Vec<serde_json::Value>> {
     let mut result = Vec::new();
 
-    if table_data.is_empty() {
+    if table_data.len() <=1 {
         return result; // No data to process
     }
 

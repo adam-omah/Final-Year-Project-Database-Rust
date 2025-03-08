@@ -1,0 +1,74 @@
+{
+  "tables": {
+    "test_table_initial": {
+      "name": "test_table_initial",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
+        },
+        {
+          "name": "number",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "text",
+          "data_type": "String",
+          "rules": []
+        },
+        {
+          "name": "timestamp",
+          "data_type": "DateTime",
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
+        }
+      ]
+    },
+    "test_table_updates": {
+      "name": "test_table_updates",
+      "columns": [
+        {
+          "name": "UUID",
+          "data_type": "UUID",
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
+        },
+        {
+          "name": "number",
+          "data_type": "Int",
+          "rules": []
+        },
+        {
+          "name": "text",
+          "data_type": "String",
+          "rules": []
+        },
+        {
+          "name": "timestamp",
+          "data_type": "DateTime",
+          "rules": [
+            {
+              "constraint_type": "NotNull",
+              "action": "Reject"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

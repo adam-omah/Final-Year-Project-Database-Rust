@@ -45,6 +45,25 @@ pub async fn insert_row(
             )
         })?;
 
+    // Validate column names if provided
+    if let Some(ref provided_column_names) = column_names {
+        // Create a set of valid column names from the schema for efficient lookup
+        let valid_column_names: HashSet<String> = table_schema.columns
+            .iter()
+            .map(|col| col.name.clone())
+            .collect();
+
+        // Check if all provided column names exist in the schema
+        for column_name in provided_column_names {
+            if !valid_column_names.contains(column_name) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Invalid column name: '{}'", column_name)
+                ));
+            }
+        }
+    }
+
     // Step 1: Build a `HashMap` to pair column names and their respective data values
     let mut row_data_map: HashMap<String, String> = HashMap::new();
 

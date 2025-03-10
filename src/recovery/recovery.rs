@@ -182,19 +182,42 @@ impl LogRecoveryManager {
             ]
         }));
 
-        // Only add tables if they don't already exist
+        // Check if table exists, and if it does, compare the schema
         if !schema["tables"].get(initial_table_name).is_some() {
             schema["tables"][initial_table_name] = json!({
-            "name": initial_table_name,
-            "columns": columns
-        });
+        "name": initial_table_name,
+        "columns": columns
+    });
+        } else {
+            // Compare existing schema with new schema
+            let existing_schema = schema["tables"][initial_table_name]["columns"].clone();
+            if existing_schema != json!(columns) {
+                tracing::info!(
+            "Updating schema for table {}: existing schema differs from recovery schema",
+            initial_table_name
+        );
+                // Update the existing schema to match the new columns
+                schema["tables"][initial_table_name]["columns"] = json!(columns);
+            }
         }
 
+        // Do the same for updates table
         if !schema["tables"].get(updates_table_name).is_some() {
-                schema["tables"][updates_table_name] = json!({
-                "name": updates_table_name,
-                "columns": columns
-            });
+            schema["tables"][updates_table_name] = json!({
+        "name": updates_table_name,
+        "columns": columns
+    });
+        } else {
+            // Compare existing schema with new schema
+            let existing_schema = schema["tables"][updates_table_name]["columns"].clone();
+            if existing_schema != json!(columns) {
+                tracing::info!(
+            "Updating schema for table {}: existing schema differs from recovery schema",
+            updates_table_name
+        );
+                // Update the existing schema to match the new columns
+                schema["tables"][updates_table_name]["columns"] = json!(columns);
+            }
         }
 
         // Write updated schema back to file

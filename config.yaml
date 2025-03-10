@@ -1,4 +1,4 @@
-db_dir: "my_recovery_db"
+db_dir: "my_test_db"
 schema_file: "schema.json"
 table_dir: "tables"
 database_name: "my_test_db"

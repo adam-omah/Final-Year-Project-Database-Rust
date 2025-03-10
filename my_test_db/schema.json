@@ -1,74 +1,74 @@
 {
   "tables": {
     "test_table_initial": {
-      "name": "test_table_initial",
       "columns": [
         {
-          "name": "UUID",
           "data_type": "UUID",
+          "name": "UUID",
           "rules": [
             {
-              "constraint_type": "NotNull",
-              "action": "Reject"
+              "action": "Reject",
+              "constraint_type": "NotNull"
             }
           ]
         },
         {
-          "name": "number",
           "data_type": "Int",
+          "name": "number",
           "rules": []
         },
         {
-          "name": "text",
           "data_type": "String",
+          "name": "text",
           "rules": []
         },
         {
-          "name": "timestamp",
           "data_type": "DateTime",
+          "name": "timestamp",
           "rules": [
             {
-              "constraint_type": "NotNull",
-              "action": "Reject"
+              "action": "Reject",
+              "constraint_type": "NotNull"
             }
           ]
         }
-      ]
+      ],
+      "name": "test_table_initial"
     },
     "test_table_updates": {
-      "name": "test_table_updates",
       "columns": [
         {
-          "name": "UUID",
           "data_type": "UUID",
+          "name": "UUID",
           "rules": [
             {
-              "constraint_type": "NotNull",
-              "action": "Reject"
+              "action": "Reject",
+              "constraint_type": "NotNull"
             }
           ]
         },
         {
-          "name": "number",
           "data_type": "Int",
+          "name": "number",
           "rules": []
         },
         {
-          "name": "text",
           "data_type": "String",
+          "name": "text",
           "rules": []
         },
         {
-          "name": "timestamp",
           "data_type": "DateTime",
+          "name": "timestamp",
           "rules": [
             {
-              "constraint_type": "NotNull",
-              "action": "Reject"
+              "action": "Reject",
+              "constraint_type": "NotNull"
             }
           ]
         }
-      ]
+      ],
+      "name": "test_table_updates"
     }
   }
 }

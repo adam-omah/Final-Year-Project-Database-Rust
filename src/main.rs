@@ -25,7 +25,8 @@ pub mod records;
 pub mod query;
 pub mod executer;
 pub mod change_logging;
-mod recovery;
+pub mod recovery;
+pub mod replication;
 
 // public constants
 pub const DB_DIR: &str = "my_rust_db";

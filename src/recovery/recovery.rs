@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 // recovery.rs
 use std::path::{Path, PathBuf};
@@ -8,9 +9,11 @@ use actix_web::{get, post, web, HttpResponse, Responder};
 use actix_web::cookie::time::format_description::well_known::iso8601::Config;
 use serde_json::{json, Value};
 use anyhow::{Result, Context, ensure};
-use tracing::log::{error, info};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
+use tracing::log::{debug, error, info};
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
+use crate::schema::schema::{load_schema, save_schema};
 
 #[derive(Clone)]
 pub struct LogRecoveryManager {
@@ -47,9 +50,6 @@ impl LogRecoveryManager {
         for (table_name, logs) in table_logs {
             self.process_table_recovery(&table_name, logs)?;
         }
-
-        // Clear the log file after successful recovery
-        // self.clear_log_file()?;
 
         Ok(())
     }
@@ -121,6 +121,9 @@ impl LogRecoveryManager {
                     // Append to updates table
                     self.handle_row_deletion(&updates_table_path, &log)?;
                 },
+                "Drop" => {
+                    self.handle_drop_table(&initial_table_path, &updates_table_path, &log)?;
+                }
                 _ => {
                     println!("Unhandled change type: {}", change_type);
                 }
@@ -274,8 +277,6 @@ impl LogRecoveryManager {
             .and_then(|v| v.as_str())
             .context("No UUID found in row data")?;
 
-        info!("UUID: {}", row_uuid);
-
         let row_timestamp = row_data.last()
             .and_then(|v| v.as_str())
             .context("No timestamp found in row data")?;
@@ -295,9 +296,11 @@ impl LogRecoveryManager {
             if file_contents.lines()
                 .any(|line| {
                     let columns: Vec<&str> = line.split(',').collect();
-                    if columns.len() >= 4 {
+
+                    // Check if the line has enough columns to perform the comparison
+                    if columns.len() >= 2 {  // Minimum required columns for meaningful comparison
                         columns[0].trim() == row_uuid &&
-                            columns[3].trim() == row_timestamp
+                            columns[columns.len() - 1].trim() == row_timestamp
                     } else {
                         false
                     }
@@ -309,6 +312,44 @@ impl LogRecoveryManager {
         self.append_to_file(updates_table_path, &row_csv)?;
         Ok(())
     }
+
+    fn handle_drop_table(
+        &self,
+        initial_table_path: &str,
+        updates_table_path: &str,
+        log: &Value
+    ) -> Result<()> {
+        let table_name = log["table_name"].as_str()
+            .ok_or(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid table name in drop log"
+            ))?;
+
+        // Load current schema
+        let mut schema = load_schema(&self.config)?;
+
+        // Remove both _initial and _updates entries from schema
+        schema.tables.remove(&format!("{}_initial", table_name));
+        schema.tables.remove(&format!("{}_updates", table_name));
+
+        // Save the updated schema
+        save_schema(&schema, &self.config)?;
+
+        // Remove initial and updates files
+        if Path::new(initial_table_path).exists() {
+            fs::remove_file(initial_table_path)?;
+        }
+        if Path::new(updates_table_path).exists() {
+            fs::remove_file(updates_table_path)?;
+        }
+
+        // Optional: Log the drop table operation for audit purposes
+        info!("Dropped table: {} during log recovery", table_name);
+
+        Ok(())
+    }
+
+
 
     /// Handle row deletion
     fn handle_row_deletion(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
@@ -380,20 +421,156 @@ impl LogRecoveryManager {
         Ok(())
     }
 
-    // Clear the log file after successful recovery
-    // fn clear_log_file(&self) -> Result<()> {
-    //     // Truncate the file
-    //     let file = File::create(&self.log_directory.join(&self.log_file))
-    //         .context("Failed to clear log file")?;
-    //
-    //     Ok(())
-    // }
+    fn get_log_timestamp(&self, log: &serde_json::Value) -> Option<DateTime<Utc>> {
+        // Timestamp candidates in order of priority
+        let timestamp_candidates = vec![
+            // 1. Direct timestamp in data
+            log.get("data").and_then(|data| data.get("timestamp")),
+            // 2. Timestamp as last element in row_data
+            log.get("data")
+                .and_then(|data| data.get("row_data"))
+                .and_then(|row_data| {
+                    if let Value::Array(arr) = row_data {
+                        // Get the last element of the array
+                        arr.last()
+                    } else {
+                        None
+                    }
+                }),
+            // 3. Timestamp at root level
+            log.get("timestamp"),
+        ];
+
+        // Attempt parsing with multiple formats
+        let formats = [
+            "%Y-%m-%d %H:%M:%S",   // Standard format
+            "%Y-%m-%dT%H:%M:%S",   // ISO-like format
+            "%Y-%m-%d %H:%M:%S%.f" // With optional microseconds
+        ];
+
+        for candidate in timestamp_candidates {
+            if let Some(ts) = candidate.and_then(|t| t.as_str()) {
+                // Remove surrounding quotes and whitespace
+                let cleaned_ts = ts.trim_matches('"').trim();
+                for format in &formats {
+                    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(cleaned_ts, format) {
+                        let timestamp = naive_dt.and_local_timezone(Utc).unwrap();
+                        return Some(timestamp);
+                    }
+                }
+            }
+        }
+
+        // Log detailed information if no timestamp found
+        error!(
+            "No valid timestamp found in log entry. Log details: {}",
+            serde_json::to_string_pretty(log).unwrap_or_default()
+        );
+        None
+    }
+
+
+    fn recover_database_state_since(&self, since_timestamp: DateTime<Utc>) -> Result<()> {
+        info!("Recovering database state since: {}", since_timestamp);
+
+        // Read all log entries
+        let log_entries = self.read_log_entries()?;
+        info!("Total log entries: {}", log_entries.len());
+
+        // Detailed logging for filtering
+        let filtered_logs: Vec<serde_json::Value> = log_entries
+            .into_iter()
+            .filter(|log| {
+                if let Some(log_time) = self.get_log_timestamp(log) {
+                    let is_after = log_time > since_timestamp;
+                    is_after
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        info!("Filtered log entries: {}", filtered_logs.len());
+
+        // Rest of the recovery logic remains similar to previous implementation
+        if filtered_logs.is_empty() {
+            info!("No logs found after the specified timestamp");
+            return Ok(());
+        }
+
+        // Group logs by table name
+        let mut table_logs: std::collections::HashMap<String, Vec<serde_json::Value>> =
+            std::collections::HashMap::new();
+
+        for log in filtered_logs {
+            if let Some(table_name) = log.get("table_name")
+                .and_then(|tn| tn.as_str())
+                .map(|s| s.to_string()) {
+                table_logs.entry(table_name)
+                    .or_insert_with(Vec::new)
+                    .push(log);
+            }
+        }
+
+        // Process recovery for each table
+        for (table_name, logs) in table_logs {
+            info!("Processing recovery for table: {}", table_name);
+            // Sort logs by timestamp
+            let mut sorted_logs = logs;
+            sorted_logs.sort_by(|a, b| {
+                let a_time = self.get_log_timestamp(a)
+                    .unwrap_or_else(|| Utc::now());
+                let b_time = self.get_log_timestamp(b)
+                    .unwrap_or_else(|| Utc::now());
+                a_time.cmp(&b_time)
+            });
+            // Process table recovery
+            self.process_table_recovery(&table_name, sorted_logs)?;
+        }
+        Ok(())
+    }
+
+    // An overloaded version for convenience (Duration)
+    fn recover_database_state_since_duration(&self, duration: Duration) -> Result<()> {
+        let since_timestamp = Utc::now() - duration;
+        self.recover_database_state_since(since_timestamp)
+    }
+
 }
 
 /// Public function to run recovery
 pub fn run_log_recovery(config: &DatabaseConfig) -> Result<()> {
     let recovery_manager = LogRecoveryManager::new(config.clone());
     recovery_manager.recover_database_state()
+}
+
+fn recover_specific_table(config: &DatabaseConfig ,table_name: &str) -> Result<()> {
+    let recovery_manager = LogRecoveryManager::new(config.clone());
+
+    // Read log entries
+    let log_entries = recovery_manager.read_log_entries()?;
+
+    // Filter logs for specific table
+    let table_specific_logs: Vec<serde_json::Value> = log_entries
+        .into_iter()
+        .filter(|entry| {
+            entry.get("table_name")
+                .and_then(|name| name.as_str())
+                .map_or(false, |name| name == table_name)
+        })
+        .collect();
+
+    // Process recovery for specific table
+    recovery_manager.process_table_recovery(table_name, table_specific_logs)?;
+
+    Ok(())
+}
+
+// Configuration function to add routes to the service
+pub fn configure_recovery_routes(cfg: &mut web::ServiceConfig) {
+    cfg.service(trigger_log_recovery)
+        .service(trigger_specific_table_recovery)
+        .service(trigger_time_based_recovery);
 }
 
 
@@ -447,30 +624,48 @@ pub async fn trigger_specific_table_recovery(
     }
 }
 
-fn recover_specific_table(config: &DatabaseConfig ,table_name: &str) -> Result<()> {
-    let recovery_manager = LogRecoveryManager::new(config.clone());
+#[post("/api/recovery/trigger/time-based")]
+pub async fn trigger_time_based_recovery(
+    app_state: web::Data<AppState>,
+    request: web::Json<Value>
+) -> impl Responder {
+    let recovery_manager = &app_state.log_recovery_manager;
 
-    // Read log entries
-    let log_entries = recovery_manager.read_log_entries()?;
+    let result = match (
+        request.get("timestamp").and_then(|v| v.as_str()),
+        request.get("duration_hours").and_then(|v| v.as_f64())
+    ) {
+        (Some(timestamp_str), None) => {
+            let timestamp = match DateTime::parse_from_rfc3339(timestamp_str) {
+                Ok(dt) => dt.with_timezone(&Utc),
+                Err(_) => return HttpResponse::BadRequest().json(json!({
+                    "status": "error",
+                    "message": "Invalid timestamp format"
+                }))
+            };
+            recovery_manager.recover_database_state_since(timestamp)
+        },
+        (None, Some(hours)) => {
+            recovery_manager.recover_database_state_since_duration(Duration::hours(hours as i64))
+        },
+        _ => {
+            return HttpResponse::BadRequest().json(json!({
+                "status": "error",
+                "message": "Provide either timestamp or duration, not both"
+            }));
+        }
+    };
 
-    // Filter logs for specific table
-    let table_specific_logs: Vec<serde_json::Value> = log_entries
-        .into_iter()
-        .filter(|entry| {
-            entry.get("table_name")
-                .and_then(|name| name.as_str())
-                .map_or(false, |name| name == table_name)
-        })
-        .collect();
-
-    // Process recovery for specific table
-    recovery_manager.process_table_recovery(table_name, table_specific_logs)?;
-
-    Ok(())
+    match result {
+        Ok(_) => HttpResponse::Ok().json(json!({
+            "status": "success",
+            "message": "Log recovery completed"
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(json!({
+            "status": "error",
+            "message": format!("Recovery failed: {}", e)
+        }))
+    }
 }
 
-// Configuration function to add routes to the service
-pub fn configure_recovery_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(trigger_log_recovery)
-        .service(trigger_specific_table_recovery);
-}
+

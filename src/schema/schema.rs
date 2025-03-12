@@ -188,6 +188,20 @@ pub fn save_schema(schema: &Schema, config: &DatabaseConfig) -> Result<()> {
     Ok(())
 }
 
+pub fn refresh_schema(config: &DatabaseConfig, state: &web::Data<AppState>) -> Result<()> {
+    // Load the new schema from the configuration
+    let new_schema = load_schema(config)?;
+    // Acquires a mutable lock on the existing schema
+    let mut current_schema = state.schema.lock().map_err(|_|
+        std::io::Error::new(ErrorKind::Other, "Failed to acquire schema lock")
+    )?;
+    // This replaces the contents of the existing schema
+    *current_schema = new_schema;
+    Ok(())
+}
+
+
+
 
 pub fn create_table(
     schema: &mut Schema,
@@ -323,9 +337,7 @@ pub async fn check_column_rules(
     state: &web::Data<AppState>,
     row_uuid: Option<&str>
 ) -> Result<Option<String>> {
-
     let mut final_value = Some(value.to_string()); // Start with the original value
-
     for rule in &column.rules {
         match &rule.constraint_type { // Use constraint_type
             ConstraintType::NotNull => {
@@ -379,10 +391,8 @@ pub async fn check_column_rules(
                     }
                 }
             }
-            // Handle other rule types as needed
         }
     }
-
     Ok(final_value)
 }
 

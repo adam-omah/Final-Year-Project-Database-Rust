@@ -13,7 +13,8 @@ use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use tracing::log::{debug, error, info};
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
-use crate::schema::schema::{load_schema, save_schema};
+use crate::schema::schema;
+use crate::schema::schema::{load_schema, refresh_schema, save_schema};
 
 #[derive(Clone)]
 pub struct LogRecoveryManager {
@@ -84,7 +85,7 @@ impl LogRecoveryManager {
     }
 
     /// Process recovery for a specific table
-    fn process_table_recovery(&self, table_name: &str, logs: Vec<serde_json::Value>) -> Result<()> {
+    fn process_table_recovery(&self, table_name: &str, logs: Vec<Value>) -> Result<()> {
         // Determine the correct files based on table name
         let initial_table_path = format!(
             "{}/{}/{}_initial",
@@ -139,7 +140,7 @@ impl LogRecoveryManager {
         let schema_file_path = Path::new(&self.config.db_dir).join(&self.config.schema_file);
 
         // Read existing schema or create a new one if not exists
-        let mut schema: serde_json::Value = if schema_file_path.exists() {
+        let mut schema: Value = if schema_file_path.exists() {
             serde_json::from_str(&fs::read_to_string(&schema_file_path)?)?
         } else {
             json!({ "tables": {} })
@@ -188,17 +189,14 @@ impl LogRecoveryManager {
         // Check if table exists, and if it does, compare the schema
         if !schema["tables"].get(initial_table_name).is_some() {
             schema["tables"][initial_table_name] = json!({
-        "name": initial_table_name,
-        "columns": columns
-    });
+                "name": initial_table_name,
+                "columns": columns
+            });
         } else {
             // Compare existing schema with new schema
             let existing_schema = schema["tables"][initial_table_name]["columns"].clone();
             if existing_schema != json!(columns) {
-                tracing::info!(
-            "Updating schema for table {}: existing schema differs from recovery schema",
-            initial_table_name
-        );
+                tracing::info!("Updating schema for table {}: existing schema differs from recovery schema",initial_table_name);
                 // Update the existing schema to match the new columns
                 schema["tables"][initial_table_name]["columns"] = json!(columns);
             }
@@ -207,17 +205,14 @@ impl LogRecoveryManager {
         // Do the same for updates table
         if !schema["tables"].get(updates_table_name).is_some() {
             schema["tables"][updates_table_name] = json!({
-        "name": updates_table_name,
-        "columns": columns
-    });
+                "name": updates_table_name,
+                "columns": columns
+            });
         } else {
             // Compare existing schema with new schema
             let existing_schema = schema["tables"][updates_table_name]["columns"].clone();
             if existing_schema != json!(columns) {
-                tracing::info!(
-            "Updating schema for table {}: existing schema differs from recovery schema",
-            updates_table_name
-        );
+                info!("Updating schema for table {}: existing schema differs from recovery schema",updates_table_name);
                 // Update the existing schema to match the new columns
                 schema["tables"][updates_table_name]["columns"] = json!(columns);
             }
@@ -226,6 +221,8 @@ impl LogRecoveryManager {
         // Write updated schema back to file
         let schema_json = serde_json::to_string_pretty(&schema)?;
         fs::write(&schema_file_path, schema_json)?;
+
+
 
         Ok(())
     }
@@ -579,7 +576,7 @@ pub fn configure_recovery_routes(cfg: &mut web::ServiceConfig) {
 pub async fn trigger_log_recovery(
     app_state: web::Data<AppState>  // Change from Mutex<AppState> to direct AppState
 ) -> impl Responder {
-
+    refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
     // Perform log recovery
     match run_log_recovery(&app_state.config) {
         Ok(_) => {
@@ -604,6 +601,7 @@ pub async fn trigger_specific_table_recovery(
     app_state: web::Data<AppState>,  // Change from Mutex<AppState> to direct AppState
     path: web::Path<String>
 ) -> impl Responder {
+    refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
     let table_name = path.into_inner();
     // Perform table-specific recovery
     match recover_specific_table(&app_state.config, &table_name) {
@@ -629,6 +627,7 @@ pub async fn trigger_time_based_recovery(
     app_state: web::Data<AppState>,
     request: web::Json<Value>
 ) -> impl Responder {
+    refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
     let recovery_manager = &app_state.log_recovery_manager;
 
     let result = match (

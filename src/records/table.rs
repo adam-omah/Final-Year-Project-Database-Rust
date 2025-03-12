@@ -8,15 +8,17 @@ use std::path::Path;
 use crate::query::parser::Identifier;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tracing::log::{debug, info};
 use crate::schema::schema::{check_column_rules, is_valid_data_type, DataType};
 use chrono::{Local, NaiveDateTime, Utc};
 use uuid::Uuid;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
+use crate::replication::replication::replicate_change_to_nodes;
 
 pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
     let mut schema = state.schema.lock().unwrap();
-    schema_create_table(&mut schema, table.clone(), &state.config, &state.change_logger)?;
+    schema_create_table(&mut schema, table.clone(), &state.config, &state.change_logger, &state)?;
     drop(schema);
     Ok(())
 }
@@ -149,16 +151,20 @@ pub async fn insert_row(
     // Add the validated row directly to the cache
     add_row_to_cache(table_name, cache_row.clone(), state).await?;
 
-    state.change_logger.log_change(
+    let log_entry = state.change_logger.log_change(
         None,
         ChangeType::Insert,
-        table_name.to_string(),
+        table_name.to_owned(),
         serde_json::json!({
             "row_data": cache_row.clone()
         }),
         None,
-        Option::from(state.config.database_name.clone())
+        Some(state.config.database_name.clone())
     )?;
+
+    // Replicate explicitly AFTER your successful log occurring clearly here:
+    replicate_change_to_nodes(Arc::from(state.get_ref().clone()), log_entry);
+
     Ok(())
 }
 

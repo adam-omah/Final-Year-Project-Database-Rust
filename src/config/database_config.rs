@@ -14,6 +14,7 @@ pub struct DatabaseConfig {
     pub database_name: String,
     pub log_dir: PathBuf,
     pub log_file: String,
+    pub repl_node_file: PathBuf,
 }
 
 impl Default for DatabaseConfig {
@@ -26,6 +27,7 @@ impl Default for DatabaseConfig {
                 .unwrap_or_else(|_| "my_rust_db".to_string()),
             log_dir: PathBuf::from("logs"),
             log_file: "change_log.json".to_string(),
+            repl_node_file: PathBuf::from("nodes.json")
         }
     }
 }

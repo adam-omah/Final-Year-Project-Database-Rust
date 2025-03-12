@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, ErrorKind, Result};
+use std::sync::Arc;
 use actix_web::web;
+use actix_web::web::Data;
 use tracing::log::debug;
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
@@ -14,6 +16,7 @@ use crate::change_logging::change_logging::{ChangeLogger, ChangeType};
 use crate::executer::executer::evaluate_where_clause;
 use crate::query::parser::{Expression, Identifier};
 use crate::records::table::{get_column_values};
+use crate::replication::replication::replicate_change_to_nodes;
 
 // Data types for columns.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,14 +47,14 @@ pub enum ConstraintType {
     Check(Expression), // Expression is from your parser
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone,PartialEq, Eq)]
 pub struct Rule {
     pub constraint_type: ConstraintType,
     pub action: RuleAction,
 }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone,PartialEq, Eq)]
 pub enum RuleAction {
     SetNull,
     SetDefault(String),
@@ -59,20 +62,20 @@ pub enum RuleAction {
 }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Column {
     pub name: String,
     pub data_type: DataType,
     pub rules: Vec<Rule>, // Rules applied to this column
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Table {
     pub name: String,
     pub columns: Vec<Column>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default,PartialEq, Eq)]
 #[serde(default)]
 pub struct Schema {
     pub tables: HashMap<String, Table>, // Logical tables (`_initial` and `_updates` handled separately).
@@ -207,8 +210,9 @@ pub fn create_table(
     schema: &mut Schema,
     table: Table,
     config: &DatabaseConfig,
-    change_logger: &ChangeLogger
-    ) -> Result<()> {
+    change_logger: &ChangeLogger,
+    state: &web::Data<AppState>,
+) -> Result<()> {
     let initial_table_name = format!("{}_initial", table.name);
     let updates_table_name = format!("{}_updates", table.name);
 
@@ -266,21 +270,18 @@ pub fn create_table(
     if !updates_table_path.exists() {
         std::fs::File::create(updates_table_path)?;
     }
-    change_logger.log_change(
+
+    let log_entry = change_logger.log_change(
         None,
         ChangeType::Create,
         table.name.clone(),
-        serde_json::json!({
-            "columns": table.columns.iter().map(|col| serde_json::json!({
-                "name": col.name,
-                "data_type": col.data_type,
-                "rules": col.rules
-            })).collect::<Vec<_>>(),
-            "timestamp": Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
-        }),
+        serde_json::json!({"table_definition": table}),
         None,
-        Option::from(config.database_name.clone())
+        Some(config.database_name.clone()),
     )?;
+    // Explicitly replicate this change now clearly added
+    replicate_change_to_nodes(Arc::from(state.get_ref().clone()), log_entry);
+
     Ok(())
 }
 
@@ -544,10 +545,11 @@ mod schema_tests {
             schema_file: "schema.json".to_string().parse().unwrap(),
             table_dir: "tables".to_string().parse().unwrap(),
             database_name: "".to_string(),
-            log_dir: Default::default(),
+            log_dir: "test_logs".parse().unwrap(),
+            log_file: "test_logger.json".to_string(),
         };
 
-        let change_logger = ChangeLogger::new("test_logs");
+        let change_logger = ChangeLogger::new(config.clone().log_dir,config.clone().log_file);
 
         // Create test directories
         std::fs::create_dir_all(config.db_dir.join(&config.table_dir))?;

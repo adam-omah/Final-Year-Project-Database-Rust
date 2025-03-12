@@ -17,6 +17,7 @@ use schema::{
 };
 use crate::change_logging::change_logging::ChangeLogger;
 use crate::recovery::recovery::{configure_recovery_routes, trigger_log_recovery, trigger_specific_table_recovery, LogRecoveryManager};
+use crate::replication::replication::configure_replication_routes;
 
 // Module Imports.
 pub mod config;
@@ -107,6 +108,7 @@ async fn main() -> std::io::Result<()> {
             .service(execute_query_endpoint)
             .service(get_column_names_api)
             .configure(configure_recovery_routes)
+            .configure(configure_replication_routes)
             // Static file serving
             .service(Files::new("/static", "./static").show_files_listing())
             // Route for `/tables` -> `tables.html`

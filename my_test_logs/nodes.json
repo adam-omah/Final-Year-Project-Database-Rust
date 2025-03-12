@@ -1,0 +1,9 @@
+{
+  "nodes": [
+    {
+      "name": "node_at_8081",
+      "url": "http://localhost:8081",
+      "description": "Local test node running on port 8081"
+    }
+  ]
+}

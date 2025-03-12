@@ -23,8 +23,6 @@ WORKDIR /app
 COPY --from=builder /app/target/release/Final-Year-Project-Database-Rust /app/Final-Year-Project-Database-Rust
 
 # Copy other necessary files (like database directory or schema files)
-COPY my_rust_db ./mydb
-COPY my_rust_db/schema.json ./mydb/schema.json
 COPY static ./static
 COPY config.yaml ./config.yaml
 

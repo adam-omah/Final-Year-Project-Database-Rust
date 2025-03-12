@@ -18,7 +18,7 @@ use crate::schema::schema::{load_schema, refresh_schema, save_schema};
 
 #[derive(Clone)]
 pub struct LogRecoveryManager {
-    config: DatabaseConfig,
+    pub(crate) config: DatabaseConfig,
 }
 
 
@@ -135,7 +135,7 @@ impl LogRecoveryManager {
     }
 
     /// Handle table creation
-    fn handle_table_creation(&self, initial_table_path: &str, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
+    pub(crate) fn handle_table_creation(&self, initial_table_path: &str, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
         // Construct schema file path
         let schema_file_path = Path::new(&self.config.db_dir).join(&self.config.schema_file);
 
@@ -221,16 +221,23 @@ impl LogRecoveryManager {
         // Write updated schema back to file
         let schema_json = serde_json::to_string_pretty(&schema)?;
         fs::write(&schema_file_path, schema_json)?;
-
-
-
+        for table_relative_path in &[initial_table_path, updates_table_path] {
+            let table_path = Path::new(&self.config.db_dir).join(table_relative_path);
+            // Ensure directories exist, then create file if missing
+            if let Some(parent_dir) = table_path.parent() {
+                fs::create_dir_all(parent_dir)?;
+            }
+            // Open existing table file or create a new one if it doesn't exist
+            OpenOptions::new().create(true).write(true).open(&table_path)?;
+            info!("Verified existence of table file at {:?}", &table_path);
+        }
         Ok(())
     }
 
     /// Handle row insertion
-    fn handle_row_insertion(&self,
-                            initial_table_path: &str,
-                            log: &serde_json::Value
+    pub(crate) fn handle_row_insertion(&self,
+                                       initial_table_path: &str,
+                                       log: &Value
     ) -> Result<()> {
         // Get row data
         let row_data = log["data"]["row_data"].as_array()
@@ -264,7 +271,7 @@ impl LogRecoveryManager {
     }
 
     /// Handle row update
-    fn handle_row_update(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
+    pub(crate) fn handle_row_update(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
         // Get row data
         let row_data = log["data"]["row_data"].as_array()
             .context("Invalid row data")?;
@@ -310,7 +317,7 @@ impl LogRecoveryManager {
         Ok(())
     }
 
-    fn handle_drop_table(
+    pub(crate) fn handle_drop_table(
         &self,
         initial_table_path: &str,
         updates_table_path: &str,
@@ -349,7 +356,7 @@ impl LogRecoveryManager {
 
 
     /// Handle row deletion
-    fn handle_row_deletion(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
+    pub(crate) fn handle_row_deletion(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
         // Get row data
         let row_data = log["data"]["row_data"].as_array()
             .context("Invalid row data")?;

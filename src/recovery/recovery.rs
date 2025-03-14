@@ -93,6 +93,7 @@ impl LogRecoveryManager {
             self.config.table_dir.display(),
             table_name
         );
+        info!("Initial table path: {}", initial_table_path);
 
         let updates_table_path = format!(
             "{}/{}/{}_updates",
@@ -135,10 +136,10 @@ impl LogRecoveryManager {
     }
 
     /// Handle table creation
-    pub(crate) fn handle_table_creation(&self, initial_table_path: &str, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
+    pub(crate) fn handle_table_creation(&self, initial_table_path: &str, updates_table_path: &str, log: &Value) -> Result<()> {
         // Construct schema file path
         let schema_file_path = Path::new(&self.config.db_dir).join(&self.config.schema_file);
-
+        info!("Log given {}", log);
         // Read existing schema or create a new one if not exists
         let mut schema: Value = if schema_file_path.exists() {
             serde_json::from_str(&fs::read_to_string(&schema_file_path)?)?
@@ -170,7 +171,8 @@ impl LogRecoveryManager {
         ];
 
         // Add columns from log
-        if let Some(log_columns) = log["data"]["columns"].as_array() {
+        if let Some(log_columns) = log["data"]["table_definition"]["columns"].as_array() {
+            info!("Log columns {:?}", log_columns);
             columns.extend(log_columns.iter().cloned());
         }
 
@@ -222,7 +224,7 @@ impl LogRecoveryManager {
         let schema_json = serde_json::to_string_pretty(&schema)?;
         fs::write(&schema_file_path, schema_json)?;
         for table_relative_path in &[initial_table_path, updates_table_path] {
-            let table_path = Path::new(&self.config.db_dir).join(table_relative_path);
+            let table_path = Path::new(table_relative_path);
             // Ensure directories exist, then create file if missing
             if let Some(parent_dir) = table_path.parent() {
                 fs::create_dir_all(parent_dir)?;
@@ -239,6 +241,8 @@ impl LogRecoveryManager {
                                        initial_table_path: &str,
                                        log: &Value
     ) -> Result<()> {
+        info!("Log given to insert: {}", log);
+        info!("row data: {}", log["data"]["row_data"]);
         // Get row data
         let row_data = log["data"]["row_data"].as_array()
             .context("Invalid row data")?;

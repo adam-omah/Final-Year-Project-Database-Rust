@@ -255,7 +255,7 @@ pub async fn update_row(
         .map(|value| quote_if_needed(value))
         .collect::<Vec<String>>();
 
-    state.change_logger.log_change(
+    let log_entry = state.change_logger.log_change(
         None,
         ChangeType::Update,
         table_name.to_string(),
@@ -263,9 +263,10 @@ pub async fn update_row(
             "row_data": log_row
         }),
         None,
-        Option::from(state.config.database_name.clone())
+        Some(state.config.database_name.clone())
     )?;
-
+    // Replicate explicitly AFTER your successful log occurring
+    replicate_change_to_nodes(Arc::from(state.get_ref().clone()), log_entry);
 
     Ok(())
 }
@@ -334,7 +335,7 @@ pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<Ap
         .map(|value| quote_if_needed(value))
         .collect::<Vec<String>>();
 
-    state.change_logger.log_change(
+    let log_entry = state.change_logger.log_change(
         None,
         ChangeType::Delete,
         table_name.to_string(),
@@ -342,8 +343,10 @@ pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<Ap
             "row_data": log_row
         }),
         None,
-        Option::from(state.config.database_name.clone())
+        Some(state.config.database_name.clone())
     )?;
+    // Replicate explicitly AFTER your successful log occurring
+    replicate_change_to_nodes(Arc::from(state.get_ref().clone()), log_entry);
     Ok(())
 }
 

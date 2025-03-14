@@ -180,7 +180,7 @@ async fn handle_drop(
     };
 
     // Attempt to drop the table
-    match drop_table(&mut schema, table_name, &data.config, &data.change_logger) {
+    match drop_table(&mut schema, table_name, &data) {
         Ok(_) => {
             HttpResponse::Ok().json(json!({
                 "message": format!("Table {} dropped successfully", table_name)

@@ -1,5 +1,4 @@
 // Schema.rs
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -191,7 +190,7 @@ pub fn save_schema(schema: &Schema, config: &DatabaseConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn refresh_schema(config: &DatabaseConfig, state: &web::Data<AppState>) -> Result<()> {
+pub fn refresh_schema(config: &DatabaseConfig, state: &Data<AppState>) -> Result<()> {
     // Load the new schema from the configuration
     let new_schema = load_schema(config)?;
     // Acquires a mutable lock on the existing schema
@@ -288,8 +287,7 @@ pub fn create_table(
 pub fn drop_table(
     schema: &mut Schema,
     table_name: &str,
-    config: &DatabaseConfig,
-    change_logger: &ChangeLogger
+    state: &Data<AppState>,
 ) -> Result<()> {
     // Create variants for initial and updates tables
     let initial_table = format!("{}_initial", table_name);
@@ -300,11 +298,11 @@ pub fn drop_table(
     schema.tables.remove(&updates_table);
 
     // Save the updated schema
-    save_schema(schema, config)?;
+    save_schema(schema, &state.config)?;
 
     // Delete corresponding table files
-    let initial_file_path = config.db_dir.join(&config.table_dir).join(&initial_table);
-    let updates_file_path = config.db_dir.join(&config.table_dir).join(&updates_table);
+    let initial_file_path = &state.config.db_dir.join(&state.config.table_dir).join(&initial_table);
+    let updates_file_path = &state.config.db_dir.join(&state.config.table_dir).join(&updates_table);
 
     // Remove table files if they exist
     if initial_file_path.exists() {
@@ -316,7 +314,7 @@ pub fn drop_table(
     }
 
     // Log the table drop operation
-    change_logger.log_change(
+    let log_entry = state.change_logger.log_change(
         None,
         ChangeType::Drop,
         table_name.to_string(),
@@ -325,9 +323,9 @@ pub fn drop_table(
             "timestamp": Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         }),
         None,
-        Option::from(config.database_name.clone())
+        Option::from(state.config.database_name.clone())
     )?;
-
+    replicate_change_to_nodes(Arc::from(state.get_ref().clone()), log_entry);
     Ok(())
 }
 
@@ -547,6 +545,7 @@ mod schema_tests {
             database_name: "".to_string(),
             log_dir: "test_logs".parse().unwrap(),
             log_file: "test_logger.json".to_string(),
+            repl_node_file: Default::default(),
         };
 
         let change_logger = ChangeLogger::new(config.clone().log_dir,config.clone().log_file);

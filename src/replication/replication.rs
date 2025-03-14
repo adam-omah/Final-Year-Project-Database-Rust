@@ -15,7 +15,7 @@ use crate::AppState;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 use crate::config::database_config::DatabaseConfig;
 use crate::recovery::recovery::LogRecoveryManager;
-use crate::schema::schema::Schema;
+use crate::schema::schema::{refresh_schema, Schema};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ReplicationRequest {
@@ -52,7 +52,7 @@ async fn append_and_action_log(app_state: &web::Data<AppState>, entry: &ChangeLo
         return Ok(());
     }
 
-    // Serialize and append entry
+    // Serialize and append entry to log file.
     let serialized_entry = serde_json::to_string(&entry)?;
     append_to_file(&log_file_path, &serialized_entry)?;
 
@@ -108,25 +108,29 @@ fn action_log_entry(log_manager: &LogRecoveryManager, entry: &ChangeLogEntry) ->
         entry.table_name
     );
 
+    info!("replication passed initial table path {}", initial_table_path);
+
+
+    let entry_value = serde_json::to_value(entry)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     match entry.change_type {
         ChangeType::Insert =>
-            log_manager.handle_row_insertion(&initial_table_path, &entry.data)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+            log_manager.handle_row_insertion(&initial_table_path, &entry_value)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
         ChangeType::Update =>
-            log_manager.handle_row_update(&updates_table_path, &entry.data)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+            log_manager.handle_row_update(&updates_table_path, &entry_value)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
         ChangeType::Delete =>
-            log_manager.handle_row_deletion(&updates_table_path, &entry.data)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+            log_manager.handle_row_deletion(&updates_table_path, &entry_value)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
         ChangeType::Create =>
-            log_manager.handle_table_creation(&initial_table_path, &updates_table_path, &entry.data)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+            log_manager.handle_table_creation(&initial_table_path, &updates_table_path, &entry_value)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
         ChangeType::Drop =>
-            log_manager.handle_drop_table(&initial_table_path, &updates_table_path, &entry.data)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+            log_manager.handle_drop_table(&initial_table_path, &updates_table_path, &entry_value)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
     }
-
     Ok(())
 }
 
@@ -257,8 +261,11 @@ async fn replication_push(
                 message: Some(format!("Replication failed: {:?}", e)),
             }));
         }
+        // refresh the schema after changes.
+        if(has_schema_change){
+            refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
+        }
     }
-
     Ok(HttpResponse::Ok().json(ReplicationResponse {
         status: "success".into(),
         message: None,

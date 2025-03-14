@@ -741,9 +741,7 @@ fn merge_row_with_updates(initial_row: Vec<String>, updates: Vec<Vec<String>>) -
     let mut current_row = initial_row.clone();
     for update in updates {
         for (index, value) in update.iter().enumerate() {
-            if !value.is_empty() && value != "ROW_REMOVED" {
                 current_row[index] = value.clone();
-            }
         }
     }
     current_row
@@ -755,6 +753,47 @@ fn parse_timestamp_from_row(row: &Vec<String>) -> Option<NaiveDateTime> {
         .find(|col| col.contains("-") && col.contains(":"))
         .and_then(|timestamp| NaiveDateTime::parse_from_str(timestamp.trim_matches('"'), "%Y-%m-%d %H:%M:%S").ok())
 }
+
+pub async fn refresh_all_tables(state: &web::Data<AppState>) -> Result<()> {
+    // Get the list of unique table base names from the schema
+    let table_names: Vec<String> = {
+        let schema = state.schema.lock().map_err(|_| std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to lock schema"
+        ))?;
+
+        schema.tables.keys()
+            .filter_map(|key| {
+                key.replace("_initial", "")
+                    .replace("_updates", "")
+                    .is_empty()
+                    .then(|| key.replace("_initial", ""))
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
+    };
+
+    // Iterate through all tables and recalculate each
+    for table_name in table_names {
+        // First, get the initial table data
+        let initial_table_data = get_table_data(state.clone(), &table_name)
+            .await
+            .map_err(|_| std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to get table data for {}", table_name)
+            ))?;
+        // Recalculate the entire table
+        recalculate_table(state, &table_name, initial_table_data)
+            .await
+            .map_err(|_| std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to recalculate table {}", table_name)
+            ))?;
+    }
+    Ok(())
+}
+
 
 
 pub async fn get_table_at_timestamp(

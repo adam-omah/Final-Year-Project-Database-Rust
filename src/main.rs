@@ -17,7 +17,12 @@ use schema::{
 };
 use crate::change_logging::change_logging::ChangeLogger;
 use crate::recovery::recovery::{configure_recovery_routes, trigger_log_recovery, trigger_specific_table_recovery, LogRecoveryManager};
-use crate::replication::replication::configure_replication_routes;
+use crate::replication::active_replication::configure_replication_routes;
+use crate::replication::passive_replication::{
+    PassiveReplicationQueue,
+    PassiveReplicationService
+};
+
 
 // Module Imports.
 pub mod config;
@@ -40,8 +45,45 @@ pub struct AppState {
     pub config: DatabaseConfig,
     pub cache: Arc<Mutex<BTreeMap<String, Vec<Vec<String>>>>>, // Cache holds up-to-date data.
     pub change_logger: ChangeLogger,
-    pub log_recovery_manager: LogRecoveryManager
+    pub log_recovery_manager: LogRecoveryManager,
+    pub passive_replication_queue: Arc<Mutex<PassiveReplicationQueue>>,
+    pub passive_replication_service: Arc<Mutex<PassiveReplicationService>>,
 }
+
+impl AppState {
+    pub fn new(
+        schema: Arc<Mutex<Schema>>,
+        config: DatabaseConfig,
+        cache: Arc<Mutex<BTreeMap<String, Vec<Vec<String>>>>>,
+        change_logger: ChangeLogger,
+        log_recovery_manager: LogRecoveryManager,
+    ) -> Self {
+        let app_state = Self {
+            schema: schema.clone(),
+            config: config.clone(),
+            cache,
+            change_logger,
+            log_recovery_manager,
+            passive_replication_queue: Arc::new(Mutex::new(PassiveReplicationQueue::new())),
+            passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
+        };
+
+        // Initialize passive replication service
+        app_state.start_passive_replication_service();
+
+        app_state
+    }
+
+    // Method to start passive replication service
+    fn start_passive_replication_service(&self) {
+        let mut service = self.passive_replication_service.lock().unwrap();
+        service.start(
+            Arc::new(Mutex::new(self.clone())),
+            self.config.clone()
+        );
+    }
+}
+
 
 fn init_database(config: &DatabaseConfig) -> Result<()> {
     std::fs::create_dir_all(&config.db_dir)?;
@@ -65,9 +107,10 @@ async fn main() -> std::io::Result<()> {
         "../config.yaml",          // From local
     ])
         .unwrap_or_else(|_| DatabaseConfig::default());
+    // Initialize database
     init_database(&config)?;
+
     let schema = Arc::new(Mutex::new(load_schema(&config)?));
-    let cache = Arc::new(Mutex::new(BTreeMap::new())); // Initialize the cache.
 
     // Read hostname from environment variable, default to 0.0.0.0
     let hostname = env::var("HOSTNAME").unwrap_or_else(|_| "0.0.0.0".to_string());
@@ -79,21 +122,20 @@ async fn main() -> std::io::Result<()> {
         .expect("Invalid port number");
 
     //log directory
-    let log_directory = config.log_dir.clone();
-    let log_file = config.log_file.clone();
     let log_recovery_manager = LogRecoveryManager::new(config.clone());
 
     // Initialize the database
     init_database(&config).expect("Failed to initialize database");
 
     // Create app state
-    let app_state = AppState {
-        schema: schema.clone(),
-        config: config.clone(),
-        cache: cache.clone(),
-        change_logger: ChangeLogger::new(log_directory.clone(), log_file.clone()),
-        log_recovery_manager: log_recovery_manager.clone(),
-    };
+    let app_state = AppState::new(
+        schema,
+        config.clone(),
+        Arc::new(Mutex::new(BTreeMap::new())),
+        ChangeLogger::new(config.log_dir.clone(), config.log_file.clone()),
+        log_recovery_manager
+    );
+
 
 
 
@@ -172,6 +214,8 @@ mod app_tests {
             cache: cache.clone(),
             change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
             log_recovery_manager: log_recovery_manager.clone(),
+            passive_replication_queue: Arc::new(Mutex::new(Default::default())),
+            passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         });
 
         if !schema.lock().unwrap().tables.contains_key("users") {
@@ -240,7 +284,7 @@ mod app_tests {
             ..Default::default()
         };
         init_database(&test_config)?;
-
+        let cache = Arc::new(Mutex::new(BTreeMap::new()));
         let schema = Arc::new(Mutex::new(load_schema(&test_config)?));
         let log_directory = test_config.log_dir.clone();
         let log_recovery_manager = LogRecoveryManager::new(test_config.clone());
@@ -248,9 +292,11 @@ mod app_tests {
         let app_state = web::Data::new(AppState {
             schema: schema.clone(),
             config: test_config.clone(),
-            cache: Arc::new(Mutex::new(BTreeMap::new())),
+            cache: cache.clone(),
             change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
             log_recovery_manager: log_recovery_manager.clone(),
+            passive_replication_queue: Arc::new(Mutex::new(Default::default())),
+            passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         });
 
         // Initialize Actix Web app
@@ -309,6 +355,8 @@ mod app_tests {
             cache: cache.clone(),
             change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
             log_recovery_manager: log_recovery_manager.clone(),
+            passive_replication_queue: Arc::new(Mutex::new(Default::default())),
+            passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         });
 
         let app = test::init_service(
@@ -352,6 +400,8 @@ mod app_tests {
             cache: cache.clone(),
             change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
             log_recovery_manager: log_recovery_manager.clone(),
+            passive_replication_queue: Arc::new(Mutex::new(Default::default())),
+            passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         });
 
         let app = test::init_service(

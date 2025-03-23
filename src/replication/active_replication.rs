@@ -15,6 +15,7 @@ use crate::AppState;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 use crate::config::database_config::DatabaseConfig;
 use crate::recovery::recovery::LogRecoveryManager;
+use crate::replication::passive_replication::{get_replication_queue_status, queue_passive_replication};
 use crate::schema::schema::{refresh_schema, Schema};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -94,7 +95,6 @@ fn action_log_entry(log_manager: &LogRecoveryManager, entry: &ChangeLogEntry) ->
     let db_config = &log_manager.config;
     let table_dir = &db_config.table_dir;
     let db_dir = &db_config.db_dir;
-
     let initial_table_path = format!(
         "{}/{}/{}_initial",
         db_dir.display(),
@@ -107,10 +107,7 @@ fn action_log_entry(log_manager: &LogRecoveryManager, entry: &ChangeLogEntry) ->
         table_dir.display(),
         entry.table_name
     );
-
     info!("replication passed initial table path {}", initial_table_path);
-
-
     let entry_value = serde_json::to_value(entry)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
@@ -159,67 +156,79 @@ pub fn replicate_change_to_nodes(
     state: Arc<AppState>,
     log_entry: ChangeLogEntry,
 ) {
+    // Clone necessary data
+    let nodes_config = match load_nodes(&state.config) {
+        Ok(config) => config,
+        Err(_) => return,  // Silently fail if nodes can't be loaded
+    };
+
+    // Spawn an async task for replication
     actix_web::rt::spawn(async move {
-        let nodes_cfg = match load_nodes(&state.config) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!("Failed loading nodes for replication: {:?}", e);
-                return;
-            }
-        };
-
-        if nodes_cfg.nodes.is_empty() {
-            info!("No replication nodes are configured at the moment.");
-            return;
-        }
-
         let client = Client::default();
 
         let replication_request = ReplicationRequest {
             schema: state.schema.lock().unwrap().clone(),
-            entries: vec![log_entry],
+            entries: vec![log_entry.clone()],
         };
 
-        // Create all replication tasks asynchronously.
-        let replication_tasks = nodes_cfg.nodes.into_iter().map(|node| {
-            let client_clone = client.clone();
-            let request_clone = replication_request.clone();
+        let mut all_nodes_success = true;
 
-            async move {
-                info!("Sending replication to node: {}", node.url);
-
-                match client_clone
-                    .post(format!("{}/api/replication/push", node.url))
-                    .insert_header(("Content-Type", "application/json"))
-                    .send_json(&request_clone)
-                    .await
-                {
-                    Ok(mut resp) => match resp.json::<ReplicationResponse>().await {
-                        Ok(parsed_resp) => info!(
-                            "Replication to node {} succeeded: {} - {:?}",
-                            node.url, parsed_resp.status, parsed_resp.message
-                        ),
-                        Err(e) => error!(
-                            "Failed parsing response from node {}: {:?}",
-                            node.url, e
-                        ),
-                    },
-                    Err(e) => error!("Error communicating with node {}: {:?}", node.url, e),
+        // Attempt to replicate to each node
+        for node in &nodes_config.nodes {
+            match replicate_to_single_node(&client, node, &replication_request).await {
+                Ok(true) => continue,
+                Ok(false) | Err(_) => {
+                    all_nodes_success = false;
+                    // Fallback to passive replication for this node
+                    fallback_to_passive_replication(state.clone(), log_entry.clone());
                 }
             }
-        });
-
-        join_all(replication_tasks).await;
-        info!("All replication tasks completed.");
+        }
     });
+}
+
+async fn replicate_to_single_node(
+    client: &Client,
+    node: &ReplicationNode,
+    request: &ReplicationRequest,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut response = client
+        .post(&format!("{}/api/replication/push", node.url))
+        .send_json(request)
+        .await?;
+
+    if response.status().is_success() {
+        let repl_response: ReplicationResponse = response.json().await?;
+        Ok(repl_response.status == "success")
+    } else {
+        Err(format!("HTTP error: {}", response.status()).into())
+    }
+}
+
+fn fallback_to_passive_replication(
+    state: Arc<AppState>,
+    log_entry: ChangeLogEntry
+) {
+    let replication_request = ReplicationRequest {
+        schema: state.schema.lock().unwrap().clone(),
+        entries: vec![log_entry],
+    };
+
+    let mut queue = state.passive_replication_queue.lock().unwrap();
+    queue.enqueue(replication_request);
 }
 
 
 
 
 
+
+
+
 pub fn configure_replication_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(replication_push);
+    cfg.service(replication_push)
+        .service(queue_passive_replication)
+        .service(get_replication_queue_status);
 }
 
 #[post("/api/replication/push")]
@@ -262,7 +271,7 @@ async fn replication_push(
             }));
         }
         // refresh the schema after changes.
-        if(has_schema_change){
+        if has_schema_change {
             refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
         }
     }

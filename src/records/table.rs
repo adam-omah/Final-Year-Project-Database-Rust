@@ -14,7 +14,7 @@ use crate::schema::schema::{check_column_rules, is_valid_data_type, DataType};
 use chrono::{Local, NaiveDateTime, Utc};
 use uuid::Uuid;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
-use crate::replication::replication::replicate_change_to_nodes;
+use crate::replication::active_replication::replicate_change_to_nodes;
 
 pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
     let mut schema = state.schema.lock().unwrap();

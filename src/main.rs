@@ -64,7 +64,7 @@ impl AppState {
             cache,
             change_logger,
             log_recovery_manager,
-            passive_replication_queue: Arc::new(Mutex::new(PassiveReplicationQueue::new())),
+            passive_replication_queue: Arc::new(Mutex::new(PassiveReplicationQueue::default())),
             passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         };
 
@@ -76,10 +76,14 @@ impl AppState {
 
     // Method to start passive replication service
     fn start_passive_replication_service(&self) {
-        let mut service = self.passive_replication_service.lock().unwrap();
-        service.start(
-            Arc::new(Mutex::new(self.clone())),
-            self.config.clone()
+        let config = self.config.clone();
+        let app_state = Arc::new(Mutex::new(self.clone()));
+
+        // Start the passive replication service
+        let mut replication_service = self.passive_replication_service.lock().unwrap();
+        replication_service.start(
+            app_state,
+            config
         );
     }
 }
@@ -100,13 +104,12 @@ async fn main() -> std::io::Result<()> {
         .init();
 
     // Load database configuration and schema
-    let config = DatabaseConfig::from_yaml(&[
-        "./config.yaml",           // Current directory
-        "/app/config.yaml",        // Docker container path
-        "/etc/myapp/config.yaml",  // System-wide config
-        "../config.yaml",          // From local
-    ])
-        .unwrap_or_else(|_| DatabaseConfig::default());
+    let config_paths = vec!["config.yaml", "./config.yaml", "/app/config.yaml", "/etc/myapp/config.yaml", "../config.yaml"];
+
+    let config = DatabaseConfig::from_yaml(&config_paths).unwrap_or_else(|e| {
+        println!("Failed to load config: {}", e);
+        DatabaseConfig::default() // Fallback to default
+    });
     // Initialize database
     init_database(&config)?;
 

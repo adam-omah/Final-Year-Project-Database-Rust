@@ -5,3 +5,9 @@ database_name: "my_test_db"
 log_dir: "my_test_logs"
 log_file: "change_log.json"
 repl_node_file: "nodes.json"
+
+# New replication configuration section
+replication:
+  max_offline_duration: 86400 # 24 hours in seconds
+  max_replication_attempts: 10
+  retry_interval: 60 # 5 minutes in seconds

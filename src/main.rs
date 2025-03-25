@@ -22,7 +22,7 @@ use crate::replication::passive_replication::{
     PassiveReplicationQueue,
     PassiveReplicationService
 };
-
+use crate::replication::replication_nodes::configure_node_routes;
 
 // Module Imports.
 pub mod config;
@@ -33,6 +33,7 @@ pub mod executer;
 pub mod change_logging;
 pub mod recovery;
 pub mod replication;
+mod global_state;
 
 // public constants
 pub const DB_DIR: &str = "my_rust_db";
@@ -116,13 +117,8 @@ async fn main() -> std::io::Result<()> {
     let schema = Arc::new(Mutex::new(load_schema(&config)?));
 
     // Read hostname from environment variable, default to 0.0.0.0
-    let hostname = env::var("HOSTNAME").unwrap_or_else(|_| "0.0.0.0".to_string());
-
-    // Read port from environment variable, default to 8080
-    let port = env::var("PORT")
-        .unwrap_or_else(|_| "8080".to_string())
-        .parse()
-        .expect("Invalid port number");
+    let hostname = config.node_url.replace("http://", "");
+    let port = config.node_port;
 
     //log directory
     let log_recovery_manager = LogRecoveryManager::new(config.clone());
@@ -154,6 +150,7 @@ async fn main() -> std::io::Result<()> {
             .service(get_column_names_api)
             .configure(configure_recovery_routes)
             .configure(configure_replication_routes)
+            .configure(configure_node_routes)
             // Static file serving
             .service(Files::new("/static", "./static").show_files_listing())
             // Route for `/tables` -> `tables.html`
@@ -163,6 +160,10 @@ async fn main() -> std::io::Result<()> {
             // Route for `/tables/{table_name}` -> `table_data.html`
             .route("/tables/{table_name}", web::get().to(|| async {
                 actix_files::NamedFile::open("./static/html/table_data.html").unwrap()
+            }))
+            // Replication Routes
+            .route("/replication", web::get().to(|| async {
+                actix_files::NamedFile::open("./static/html/replication.html").unwrap()
             }))
             // Handle root route `/` to load `index.html`
             .route("/", web::get().to(|| async {

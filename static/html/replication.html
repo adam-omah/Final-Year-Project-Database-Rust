@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Node Replication</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <style>
+        .node-list {
+            margin-bottom: 20px;
+        }
+        .node-item {
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+        .cross-node-form {
+            background-color: #f4f4f4;
+            padding: 20px;
+            border-radius: 5px;
+        }
+        .form-group {
+            margin-bottom: 10px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 5px;
+        }
+    </style>
+</head>
+<body>
+<div id="sidebar">
+    <div class="button-container">
+        <button onclick="location.href='/'" class="nav-button">Home</button>
+        <button onclick="location.href='/tables'" class="nav-button">Tables</button>
+        <button onclick="location.href='/replication'" class="nav-button active">Replication</button>
+    </div>
+</div>
+
+<div id="content">
+    <h1>Node Replication</h1>
+
+    <div class="node-list" id="current-nodes">
+        <h2>Current Registered Nodes</h2>
+        <!-- Nodes will be dynamically populated here -->
+    </div>
+
+    <div class="cross-node-form">
+        <h2>Cross-Node Registration</h2>
+        <form id="cross-node-registration">
+            <div class="form-group">
+                <label for="node-name">Node Name:</label>
+                <input type="text" id="node-name" required>
+            </div>
+            <div class="form-group">
+                <label for="node-description">Description (optional):</label>
+                <input type="text" id="node-description">
+            </div>
+            <div class="form-group">
+                <label for="node-url">Node URL:</label>
+                <input type="url" id="node-url" required>
+            </div>
+            <div class="form-group">
+                <label for="node-port">Port (optional):</label>
+                <input type="number" id="node-port" min="1" max="65535">
+            </div>
+            <div class="form-group">
+                <label for="replication-mode">Replication Mode:</label>
+                <select id="replication-mode">
+                    <option value="All">All Tables</option>
+                    <option value="Specific">Specific Tables</option>
+                </select>
+            </div>
+            <div class="form-group" id="specific-tables" style="display: none;">
+                <label for="table-list">Select Tables:</label>
+                <input type="text" id="table-list" placeholder="Comma-separated table names">
+            </div>
+            <button type="submit">Register Node</button>
+        </form>
+    </div>
+</div>
+
+<script>
+    // Dynamically load current nodes
+    async function loadCurrentNodes() {
+        try {
+            const response = await fetch('/api/load-nodes');
+            if (!response.ok) {
+                throw new Error('Failed to fetch nodes');
+            }
+            const nodesConfig = await response.json();
+            const nodes = nodesConfig.nodes;
+            const nodeListContainer = document.getElementById('current-nodes');
+
+            if (nodes.length === 0) {
+                nodeListContainer.innerHTML = '<p>No nodes registered yet.</p>';
+                return;
+            }
+
+            const nodeListHTML = nodes.map(node => `
+            <div class="node-item">
+                <h3>${node.name}</h3>
+                <p><strong>Description:</strong> ${node.description}</p>
+                <p><strong>URL:</strong> ${node.node_url}</p>
+                <p><strong>Replication Mode:</strong>
+                    ${node.replication_mode === 'All'
+                ? 'All Tables'
+                : `Specific Tables: ${
+                    Array.isArray(node.replication_mode.Specific)
+                        ? node.replication_mode.Specific.join(', ')
+                        : node.replication_mode.Specific
+                }`}
+                </p>
+                <p><strong>Shared Secret:</strong> ${node.shared_secret}</p>
+            </div>
+        `).join('');
+
+            nodeListContainer.innerHTML = `
+            <h2>Current Registered Nodes</h2>
+            ${nodeListHTML}
+        `;
+        } catch (error) {
+            console.error('Error loading nodes:', error);
+            document.getElementById('current-nodes').innerHTML =
+                `<p class="error">Failed to load nodes: ${error.message}</p>`;
+        }
+    }
+
+
+    // Handle replication mode selection
+    document.getElementById('replication-mode').addEventListener('change', function() {
+        const specificTablesDiv = document.getElementById('specific-tables');
+        specificTablesDiv.style.display =
+            this.value === 'Specific' ? 'block' : 'none';
+    });
+
+    // Handle cross-node registration
+    document.getElementById('cross-node-registration').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const nodeName = document.getElementById('node-name').value;
+        const nodeUrl = document.getElementById('node-url').value;
+        const replicationMode = document.getElementById('replication-mode').value;
+
+        let replicationModeData = replicationMode === 'All'
+            ? { type: 'All' }
+            : {
+                type: 'Specific',
+                tables: document.getElementById('table-list').value
+                    .split(',')
+                    .map(table => table.trim())
+                    .filter(table => table !== '')
+            };
+
+        try {
+            const sharedSecret = crypto.randomUUID();
+            const response = await fetch('/api/cross-node-register', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    source_node: {
+                        name: nodeName,
+                        node_url: nodeUrl + (document.getElementById('node-port').value
+                            ? `:${document.getElementById('node-port').value}`
+                            : ''),
+                        description: document.getElementById('node-description').value
+                            || 'Cross-node registration',
+                        replication_mode: replicationModeData.type === 'All'
+                            ? 'All'
+                            : { Specific: replicationModeData.tables },
+                        shared_secret: sharedSecret
+                    },
+                    proposed_shared_secret: sharedSecret
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error('Node registration failed');
+            }
+
+            const result = await response.json();
+            alert('Node registered successfully!');
+
+            // Reload nodes list
+            loadCurrentNodes();
+
+            // Reset form
+            e.target.reset();
+            document.getElementById('specific-tables').style.display = 'none';
+        } catch (error) {
+            console.error('Registration error:', error);
+            alert(`Registration failed: ${error.message}`);
+        }
+    });
+
+    // Initial load of nodes
+    loadCurrentNodes();
+</script>
+</body>
+</html>

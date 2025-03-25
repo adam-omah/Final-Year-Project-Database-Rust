@@ -11,7 +11,8 @@ use chrono::Utc;
 use futures::TryFutureExt;
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
-use crate::replication::active_replication::{load_nodes, NodesConfig, ReplicationNode, ReplicationRequest, ReplicationResponse};
+use crate::replication::active_replication::{ ReplicationRequest, ReplicationResponse};
+use crate::replication::replication_nodes::{load_nodes, ReplicationNode};
 
 // Custom error type for replication
 #[derive(Debug)]
@@ -86,9 +87,6 @@ impl PassiveReplicationQueue {
         self.queue.push(queued_request);
         id
     }
-
-
-
 
     pub fn check_offline_nodes(
         &mut self,
@@ -289,7 +287,7 @@ async fn replicate_to_single_node(
 
     // Attempt to send the replication request to the node
     match client
-        .post(format!("{}/api/replication/push", node.url))
+        .post(format!("{}/api/replication/push", node.node_url))
         .send_json(&replication_request)
         .await
     {

@@ -16,6 +16,9 @@ pub struct DatabaseConfig {
     pub log_file: String,
     pub repl_node_file: PathBuf,
     pub replication: ReplicationConfig,
+    pub node_url: String,
+    pub node_port: u16,
+
 }
 
 impl Default for DatabaseConfig {
@@ -30,43 +33,52 @@ impl Default for DatabaseConfig {
             log_file: "change_log.json".to_string(),
             repl_node_file: PathBuf::from("nodes.json"),
             replication: ReplicationConfig::default(),
+            node_url:default_node_url(),
+            node_port: default_node_port(),
         }
     }
 }
+
+fn default_node_port() -> u16 {
+    env::var("PORT")
+        .map(|p| p.parse().unwrap_or(8080))
+        .unwrap_or(8080)
+}
+
+fn default_node_url() -> String {
+    env::var("HOSTNAME")
+        .unwrap_or_else(|_| "http://0.0.0.0".to_string())
+}
+
 
 impl DatabaseConfig {
     pub fn from_yaml(paths: &[&str]) -> Result<Self, Box<dyn std::error::Error>> {
         // Try multiple potential paths
         for &path in paths {
-            println!("Attempting to load config from path: {}", path); // Add debug print
             if let Ok(file) = File::open(path) {
                 let mut contents = String::new();
                 let mut reader = std::io::BufReader::new(file);
                 if reader.read_to_string(&mut contents).is_ok() {
-                    println!("File contents:\n{}", contents); // Print file contents
+                    let mut config: DatabaseConfig = serde_yaml::from_str(&contents)?;
 
-                    // Add more detailed error handling
-                    match serde_yaml::from_str(&contents) {
-                        Ok(mut config) => {
-                            // Override database_name and hostname from environment variable
-                            let mut config: DatabaseConfig = config;
-                            config.database_name = std::env::var("DATABASE_NAME")
-                                .unwrap_or_else(|_| config.database_name.clone());
+                    // Prioritize environment variable for port
+                    config.node_port = env::var("PORT")
+                        .map(|p| p.parse().unwrap_or(config.node_port))
+                        .unwrap_or(config.node_port);
 
-                            println!("Parsed config successfully: {:?}", config);
-                            return Ok(config);
-                        }
-                        Err(e) => {
-                            println!("Deserialization error: {}", e);
-                            return Err(Box::new(e));
-                        }
-                    }
+                    // Similar overrides for other env vars
+                    config.database_name = env::var("DATABASE_NAME")
+                        .unwrap_or_else(|_| config.database_name.clone());
+
+                    config.node_url = env::var("HOSTNAME")
+                        .unwrap_or_else(|_| config.node_url.clone());
+
+                    return Ok(config);
                 }
             }
         }
-
-        // If no config file is found, return an error
-        Err("No valid configuration file found".into())
+        // If no config file is found, create default config with env var checks
+        Ok(DatabaseConfig::default())
     }
 }
 

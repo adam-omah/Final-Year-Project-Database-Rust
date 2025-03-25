@@ -1,9 +1,11 @@
 {
   "nodes": [
     {
-      "name": "node_at_8081",
-      "url": "http://localhost:8081",
-      "description": "Local test node running on port 8081"
+      "name": "test_db",
+      "node_url": "http://localhost:8081",
+      "description": "testing",
+      "replication_mode": "All",
+      "shared_secret": "08701ac6-af82-4868-913a-7be751eec183"
     }
   ]
 }

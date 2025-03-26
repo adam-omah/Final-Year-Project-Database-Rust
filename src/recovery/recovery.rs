@@ -15,7 +15,7 @@ use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
 use crate::records::table::{get_table_data, recalculate_table, recalculate_table_global, refresh_all_tables};
 use crate::schema::schema;
-use crate::schema::schema::{load_schema, refresh_schema, save_schema};
+use crate::schema::schema::{global_drop_table_from_cache, global_refresh_schema, load_schema, refresh_schema, save_schema};
 
 #[derive(Clone)]
 pub struct LogRecoveryManager {
@@ -377,9 +377,7 @@ impl LogRecoveryManager {
             fs::remove_file(updates_table_path)?;
         }
 
-        // Optional: Log the drop table operation for audit purposes
-        info!("Dropped table: {} during log recovery", table_name);
-
+        global_drop_table_from_cache(table_name.parse()?).expect("Unable to remove table from cache!");
         Ok(())
     }
 

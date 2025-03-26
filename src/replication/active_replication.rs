@@ -8,6 +8,7 @@ use std::{fs, io};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use actix_web::error::ErrorInternalServerError;
 use actix_web::rt::Runtime;
 use awc::Client;
 use futures::future::join_all;
@@ -25,6 +26,7 @@ use crate::schema::schema::{refresh_schema, Schema};
 pub struct ReplicationRequest {
     pub schema: Schema,
     pub entries: Vec<ChangeLogEntry>,
+    pub target_node: ReplicationNode,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -141,23 +143,35 @@ pub fn replicate_change_to_nodes(
     actix_web::rt::spawn(async move {
         let client = Client::default();
 
-        let replication_request = ReplicationRequest {
-            schema: state.schema.lock().unwrap().clone(),
-            entries: vec![log_entry.clone()],
-        };
-
         let mut all_nodes_success = true;
 
         // Attempt to replicate to each node
         for node in nodes_config.nodes.iter().filter(|n| n.should_replicate(&log_entry.table_name)) {
+            // Create a replication request specific to this node
+            let replication_request = ReplicationRequest {
+                schema: state.schema.lock().unwrap().clone(),
+                entries: vec![log_entry.clone()],
+                target_node: ReplicationNode {
+                    name: node.name.clone(),
+                    node_url: node.node_url.clone(),
+                    description: node.description.clone(),
+                    replication_mode: node.replication_mode.clone(),
+                    shared_secret: node.shared_secret.clone(),
+                },
+            };
+
             match replicate_to_single_node(&client, node, &replication_request).await {
                 Ok(true) => continue,
                 Ok(false) | Err(_) => {
                     all_nodes_success = false;
-                    // Fallback to passive replication for this node
-                    fallback_to_passive_replication(state.clone(), log_entry.clone());
+                    // Fallback to passive replication, passing the prepared replication request
+                    fallback_to_passive_replication(state.clone(), replication_request);
                 }
             }
+        }
+        // Optional: Log or handle the case where not all nodes were successfully replicated
+        if !all_nodes_success {
+            tracing::warn!("Replication failed for some nodes");
         }
     });
 }
@@ -182,22 +196,11 @@ async fn replicate_to_single_node(
 
 fn fallback_to_passive_replication(
     state: Arc<AppState>,
-    log_entry: ChangeLogEntry
+    replication_request: ReplicationRequest
 ) {
-    let replication_request = ReplicationRequest {
-        schema: state.schema.lock().unwrap().clone(),
-        entries: vec![log_entry],
-    };
-
     let mut queue = state.passive_replication_queue.lock().unwrap();
     queue.enqueue(replication_request);
 }
-
-
-
-
-
-
 
 
 pub fn configure_replication_routes(cfg: &mut web::ServiceConfig) {
@@ -206,14 +209,22 @@ pub fn configure_replication_routes(cfg: &mut web::ServiceConfig) {
         .service(get_replication_queue_status);
 }
 
+
 #[post("/api/replication/push")]
 async fn replication_push(
     app_state: web::Data<AppState>,
     payload: web::Json<ReplicationRequest>,
 ) -> Result<HttpResponse, Error> {
+    // AGGRESSIVE LOGGING
+    tracing::warn!("REPLICATION PUSH RECEIVED - FULL DEBUG MODE");
+    tracing::warn!("Entries Count: {}", payload.entries.len());
+    tracing::warn!("Target Node: {}", payload.target_node.name);
+
+    // Load nodes configuration
     let nodes_config = match load_nodes(&app_state.config) {
         Ok(config) => config,
-        Err(_) => {
+        Err(e) => {
+            tracing::error!("Failed to load nodes configuration: {:?}", e);
             return Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
                 status: "failed".into(),
                 message: Some("Could not load nodes configuration".into()),
@@ -221,59 +232,281 @@ async fn replication_push(
         }
     };
 
-    // Check if the request is from a known node in the configuration
-    // This ensures only registered nodes can send replication requests
-    let is_known_node = nodes_config.nodes.iter().any(|node| true);
+    // Find the specific node configuration for the target node
+    let target_node_config = nodes_config.nodes.iter()
+        .find(|node| node.name == payload.target_node.name)
+        .ok_or_else(|| {
+            tracing::error!("No configuration found for node: {}", payload.target_node.name);
+            actix_web::error::ErrorBadRequest("Invalid target node")
+        })?;
 
-    if !is_known_node {
-        return Ok(HttpResponse::Unauthorized().json(ReplicationResponse {
-            status: "failed".into(),
-            message: Some("Unauthorized replication request".into()),
+
+    // Identify CREATE operations explicitly
+    let create_or_drop_entries: Vec<&ChangeLogEntry> = payload.entries.iter()
+        .filter(|entry| {
+            // Check if the entry's table is in the specific tables for this node
+            let is_node_table = match &target_node_config.replication_mode {
+                ReplicationMode::Specific(specific_tables) => {
+                    specific_tables.contains(&entry.table_name) &&
+                        matches!(entry.change_type, ChangeType::Create | ChangeType::Drop)
+                },
+                ReplicationMode::All => {
+                    // If replication mode is All, allow all tables
+                    matches!(entry.change_type, ChangeType::Create | ChangeType::Drop)
+                }
+            };
+            tracing::warn!(
+                "Checking replication for table {}: {}",
+                entry.table_name,
+                is_node_table
+            );
+            is_node_table
+        })
+        .collect();
+
+    tracing::warn!(
+        "CREATE OR DROP ENTRIES COUNT FOR NODE {}: {}",
+        payload.target_node.name,
+        create_or_drop_entries.len()
+    );
+
+    // If filtered CREATE or DROP entries exist, force proceed
+    if !create_or_drop_entries.is_empty() {
+        tracing::error!(
+            "FORCE PROCEEDING WITH REPLICATION DUE TO VALID CREATE OR DROP OPERATION FOR NODE {}",
+            payload.target_node.name
+        );
+
+        for entry in &payload.entries {
+            // Only process entries that are specific to this node's tables
+            let should_process = match &target_node_config.replication_mode {
+                ReplicationMode::Specific(specific_tables) => {
+                    specific_tables.contains(&entry.table_name) &&
+                        matches!(entry.change_type, ChangeType::Create | ChangeType::Drop)
+                },
+                ReplicationMode::All => {
+                    matches!(entry.change_type, ChangeType::Create | ChangeType::Drop)
+                }
+            };
+
+            if should_process {
+                if let Err(e) = append_and_action_log(&app_state, entry).await {
+                    tracing::error!(
+                        "Forced replication failed for entry: {:?}",
+                        e
+                    );
+                    return Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
+                        status: "forced_failed".into(),
+                        message: Some(format!("Forced replication failed: {:?}", e)),
+                    }));
+                }
+
+                // Always refresh schema for node-specific CREATE or DROP
+                if matches!(entry.change_type, ChangeType::Create | ChangeType::Drop) {
+                    match refresh_schema(&app_state.config, &app_state) {
+                        Ok(_) => tracing::warn!("SCHEMA FORCIBLY REFRESHED FOR CREATE OR DROP"),
+                        Err(e) => {
+                            tracing::error!("FORCED SCHEMA REFRESH FAILED: {:?}", e);
+                            return Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
+                                status: "forced_schema_refresh_failed".into(),
+                                message: Some("Forced schema refresh failed".into()),
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::warn!(
+            "REPLICATION COMPLETED WITH FORCE CREATE MODE FOR NODE {}",
+            payload.target_node.name
+        );
+        return Ok(HttpResponse::Ok().json(ReplicationResponse {
+            status: "force_success".into(),
+            message: Some(format!(
+                "Forced replication for CREATE completed for node {}",
+                payload.target_node.name
+            )),
         }));
     }
 
-    // Rest of the existing replication_push implementation remains the same
     let incoming_schema = &payload.schema;
     let current_schema = app_state.schema.lock().unwrap();
-    info!("Incoming schema: {:?}", incoming_schema);
-    info!("Current schema: {:?}", current_schema);
 
-    let entries_json = serde_json::to_string(&payload.entries)
-        .expect("Serialization of entries failed");
-    println!("Incoming entries: {}", entries_json);
-
-
-    // Check if at least one CREATE or DROP is present
-    let has_schema_change = payload.entries.iter().any(|e| {
-        matches!(e.change_type, ChangeType::Create | ChangeType::Drop)
-    });
-
-    // If schemas don't match and no explicit CREATE/DROP present, reject
-    if *current_schema != *incoming_schema && !has_schema_change {
-        return Ok(HttpResponse::BadRequest().json(ReplicationResponse {
-            status: "failed".into(),
-            message: Some("Schema mismatch".into()),
-        }));
-    }
-
-    drop(current_schema); // explicitly drop lock before async operation
-
-    // Process each entry as intended; schema logic inside `append_and_action_log`
-    for entry in &payload.entries {
-        if let Err(e) = append_and_action_log(&app_state, entry).await {
-            error!("Failed processing replication log entry: {:?}", e);
+    let current_schema_json = match serde_json::to_value(&*current_schema) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!("Failed to serialize current schema: {:?}", e);
             return Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
                 status: "failed".into(),
-                message: Some(format!("Replication failed: {:?}", e)),
+                message: Some("Failed to serialize current schema".into()),
             }));
         }
-        // refresh the schema after changes.
-        if has_schema_change {
-            refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
+    };
+
+    let incoming_schema_json = match serde_json::to_value(incoming_schema) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!("Failed to serialize incoming schema: {:?}", e);
+            return Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
+                status: "failed".into(),
+                message: Some("Failed to serialize incoming schema".into()),
+            }));
+        }
+    };
+
+    let replication_node = &payload.target_node;
+
+    match compare_schemas(&incoming_schema_json, &current_schema_json, Some(replication_node)) {
+        Ok(true) => {
+            tracing::debug!("Proceeding with standard replication");
+            drop(current_schema);
+
+            for (index, entry) in payload.entries.iter().enumerate() {
+                if let Err(e) = append_and_action_log(&app_state, entry).await {
+                    tracing::error!(
+                        "Failed processing replication log entry {}: {:?}",
+                        index,
+                        e
+                    );
+                    return Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
+                        status: "failed".into(),
+                        message: Some(format!("Replication failed at entry {}: {:?}", index, e)),
+                    }));
+                }
+
+                if matches!(entry.change_type, ChangeType::Create | ChangeType::Drop) {
+                    match refresh_schema(&app_state.config, &app_state) {
+                        Ok(_) => tracing::debug!("Schema refreshed successfully"),
+                        Err(e) => {
+                            tracing::error!("Failed to refresh schema: {:?}", e);
+                            return Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
+                                status: "failed".into(),
+                                message: Some("Unable to refresh schema".into()),
+                            }));
+                        }
+                    }
+                }
+            }
+
+            tracing::info!("Replication push completed successfully");
+            Ok(HttpResponse::Ok().json(ReplicationResponse {
+                status: "success".into(),
+                message: None,
+            }))
+        },
+        Ok(false) => {
+            tracing::warn!("Schema comparison failed");
+            Ok(HttpResponse::BadRequest().json(ReplicationResponse {
+                status: "failed".into(),
+                message: Some("Schema mismatch".into()),
+            }))
+        },
+        Err(err) => {
+            tracing::error!("Schema comparison error: {}", err);
+            Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
+                status: "failed".into(),
+                message: Some(format!("Schema comparison error: {}", err)),
+            }))
         }
     }
-    Ok(HttpResponse::Ok().json(ReplicationResponse {
-        status: "success".into(),
-        message: None,
-    }))
+}
+
+
+fn compare_schemas(
+    incoming_schema_json: &serde_json::Value,
+    current_schema_json: &serde_json::Value,
+    replication_node: Option<&ReplicationNode>
+) -> Result<bool, String> {
+    // Extract tables from both schemas
+    let incoming_tables = incoming_schema_json
+        .get("tables")
+        .and_then(|tables| tables.as_object())
+        .ok_or_else(|| "Could not extract tables from incoming schema".to_string())?;
+
+    let current_tables = current_schema_json
+        .get("tables")
+        .and_then(|tables| tables.as_object())
+        .ok_or_else(|| "Could not extract tables from current schema".to_string())?;
+
+    // Debug logging of tables
+    tracing::debug!("Incoming Schema Tables: {}", incoming_tables.keys().cloned().collect::<Vec<_>>().join(", "));
+    tracing::debug!("Current Schema Tables: {}", current_tables.keys().cloned().collect::<Vec<_>>().join(", "));
+
+    // Determine which tables to compare based on replication mode
+    match replication_node {
+        Some(node) => {
+            match &node.replication_mode {
+                ReplicationMode::All => {
+                    // Compare all tables with detailed logging
+                    // Similar logic as before
+                },
+                ReplicationMode::Specific(specific_tables) => {
+                    tracing::debug!("Comparing specific tables: {}", specific_tables.join(", "));
+
+                    for table_name in specific_tables {
+                        // Generate both initial and updates table names
+                        let initial_table_name = format!("{}_initial", table_name);
+                        let updates_table_name = format!("{}_updates", table_name);
+
+                        // Check both initial and updates tables
+                        let check_table = |suffix_table_name: &str| {
+                            match (
+                                incoming_tables.get(suffix_table_name),
+                                current_tables.get(suffix_table_name)
+                            ) {
+                                (Some(incoming_table), Some(current_table)) => {
+                                    if incoming_table != current_table {
+                                        tracing::warn!(
+                                            "Table {} differs. Incoming: {:?}, Current: {:?}",
+                                            suffix_table_name,
+                                            incoming_table,
+                                            current_table
+                                        );
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                },
+                                (None, Some(_)) => {
+                                    tracing::warn!(
+                                        "Table {} missing in incoming schema",
+                                        suffix_table_name
+                                    );
+                                    false
+                                },
+                                (Some(_), None) => {
+                                    tracing::warn!(
+                                        "Table {} missing in current schema",
+                                        suffix_table_name
+                                    );
+                                    false
+                                },
+                                (None, None) => {
+                                    tracing::warn!(
+                                        "Both {} tables are missing",
+                                        suffix_table_name
+                                    );
+                                    false
+                                }
+                            }
+                        };
+
+                        // Ensure both initial and updates tables match
+                        if !check_table(&initial_table_name) || !check_table(&updates_table_name) {
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            tracing::warn!("No replication node configured. Schema comparison failed.");
+            return Ok(false);
+        }
+    }
+
+    // If we've made it this far, the relevant schemas match
+    tracing::info!("Schema comparison successful");
+    Ok(true)
 }

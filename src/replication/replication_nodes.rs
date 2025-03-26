@@ -39,10 +39,10 @@ pub struct CrossNodeRegistrationResponse {
 
 
 impl ReplicationNode {
-    pub(crate) fn should_replicate(&self, table_name: &str) -> bool {
-        match &self.replication_mode {
+    pub fn should_replicate(&self, table_name: &str) -> bool {
+        match self.replication_mode {
             ReplicationMode::All => true,
-            ReplicationMode::Specific(tables) => tables.contains(&table_name.to_string()),
+            ReplicationMode::Specific(ref tables) => tables.iter().any(|t| t == table_name),
         }
     }
 }
@@ -284,9 +284,9 @@ async fn register_with_target_node(source_node: &ReplicationNode, app_state: Dat
 
     let request_body = NodeRegistrationRequest {
         node: ReplicationNode {
-            name: local_config.database_name.clone(),
+            name: source_node.name.clone(),
             node_url: local_config.node_url,
-            description: local_config.database_name.clone(),
+            description: source_node.description.clone(),
             // Important: Use the source node's proposed replication mode
             replication_mode: source_node.replication_mode.clone(),
             shared_secret: local_shared_secret.clone(),

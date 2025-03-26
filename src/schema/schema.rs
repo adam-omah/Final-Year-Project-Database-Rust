@@ -202,7 +202,28 @@ pub fn refresh_schema(config: &DatabaseConfig, state: &Data<AppState>) -> Result
     Ok(())
 }
 
+pub fn global_refresh_schema() -> anyhow::Result<()> {
+    // Attempt to retrieve the global app state
+    let global_state = AppState::global_state()
+        .ok_or_else(|| anyhow::anyhow!("Global app state not initialized"))?;
 
+    // Extract the configuration from the global state
+    let config = global_state.config.clone();
+
+    // Load the new schema from the configuration
+    let new_schema = load_schema(&config)
+        .map_err(|e| anyhow::anyhow!("Failed to load schema: {}", e))?;
+
+    // Acquire a mutable lock on the existing schema
+    let mut current_schema = global_state.schema.lock()
+        .map_err(|_| anyhow::anyhow!("Failed to acquire schema lock"))?;
+
+    // Replace the contents of the existing schema
+    *current_schema = new_schema;
+
+    tracing::info!("Schema refreshed globally");
+    Ok(())
+}
 
 
 pub fn create_table(
@@ -325,7 +346,9 @@ pub fn drop_table(
         None,
         Option::from(state.config.database_name.clone())
     )?;
+    drop_table_from_cache(table_name, state)?;
     replicate_change_to_nodes(Arc::from(state.get_ref().clone()), log_entry);
+    // refresh_schema(&state.config, &state)?;
     Ok(())
 }
 
@@ -438,6 +461,39 @@ pub fn get_column_names_from_schema(
     }
 }
 
+
+pub fn drop_table_from_cache(
+    table_name: &str,
+    state: &web::Data<AppState>
+) -> Result<()> {
+    let mut cache = state.cache.lock().map_err(|_|
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Failed to acquire cache lock"
+        )
+    )?;
+
+    // Remove the table from the cache
+    cache.remove(table_name);
+
+    Ok(())
+}
+
+pub fn global_drop_table_from_cache(table_name: String) -> anyhow::Result<()> {
+    // Attempt to retrieve the global app state
+    let global_state = AppState::global_state()
+        .ok_or_else(|| anyhow::anyhow!("Global app state not initialized"))?;
+
+    // Use the existing drop_table_from_cache function
+    drop_table_from_cache(
+        &*table_name,
+        &web::Data::from(global_state)
+    ).map_err(|e| anyhow::anyhow!(e))?;
+
+    tracing::info!("Table dropped from global cache");
+    Ok(())
+}
+
 #[cfg(test)]
 mod schema_tests {
     use super::*;
@@ -546,6 +602,9 @@ mod schema_tests {
             log_dir: "test_logs".parse().unwrap(),
             log_file: "test_logger.json".to_string(),
             repl_node_file: Default::default(),
+            replication: Default::default(),
+            node_url: "localhost".to_string(),
+            node_port: 8080,
         };
 
         let change_logger = ChangeLogger::new(config.clone().log_dir,config.clone().log_file);
@@ -564,7 +623,7 @@ mod schema_tests {
             ],
         };
 
-        create_table(&mut schema, table, &config, &change_logger)?;
+        create_table(&mut schema, table, &config, &change_logger, Default::default())?;
 
         // Verify both initial and updates tables were created
         assert!(schema.tables.contains_key("test_table_initial"));

@@ -229,46 +229,42 @@ impl PassiveReplicationService {
     }
 }
 
-    // Helper function to attempt replication to all nodes
-    async fn try_replicate_to_nodes(
-        config: &DatabaseConfig,
-        request: &ReplicationRequest
-    ) -> Result<(), ReplicationError> {
-        let nodes = load_nodes(config)
-            .map_err(|e| ReplicationError::ConfigLoadError(e))?;
+// Helper function to attempt replication to all nodes
+async fn try_replicate_to_nodes(
+    config: &DatabaseConfig,
+    request: &ReplicationRequest
+) -> Result<(), ReplicationError> {
+    let nodes = load_nodes(config)
+        .map_err(|e| ReplicationError::ConfigLoadError(e))?;
 
-        let mut failed_nodes: Vec<String> = Vec::new();
+    let mut failed_nodes: Vec<String> = Vec::new();
 
-        // Process nodes sequentially to maintain order
-        for node in &nodes.nodes {
-            match replicate_to_single_node(node, request).await {
-                Ok(true) => {
-                    // If this node succeeds, continue to next node
-                    continue;
-                }
-                Ok(false) | Err(_) => {
-                    // Track the failed node's name
-                    failed_nodes.push(node.name.clone());
-
-                    // If the node fails, stop further replication attempts
-                    // This ensures requests are processed in order and stop on first failure
-                    return Err(ReplicationError::ReplicationFailure(
-                        format!("Failed nodes: {}", failed_nodes.join(", "))
-                    ));
-                }
+    // Process nodes sequentially to maintain order
+    for node in nodes.nodes.iter().filter(|n|
+        request.entries.iter().all(|entry| n.should_replicate(&entry.table_name))
+    ) {
+        match replicate_to_single_node(node, request).await {
+            Ok(true) => continue,
+            Ok(false) | Err(_) => {
+                failed_nodes.push(node.name.clone());
+                return Err(ReplicationError::ReplicationFailure(
+                    format!("Failed nodes: {}", failed_nodes.join(", "))
+                ));
             }
         }
-
-        // If we've gone through all nodes without returning an error, it means all succeeded
-        if failed_nodes.is_empty() {
-            Ok(())
-        } else {
-            // This should not happen given the early return, but kept for completeness
-            Err(ReplicationError::ReplicationFailure(
-                format!("Failed nodes: {}", failed_nodes.join(", "))
-            ))
-        }
     }
+
+    // If we've gone through all nodes without returning an error, it means all succeeded
+    if failed_nodes.is_empty() {
+        Ok(())
+    } else {
+        // This should not happen given the early return, but kept for completeness
+        Err(ReplicationError::ReplicationFailure(
+            format!("Failed nodes: {}", failed_nodes.join(", "))
+        ))
+    }
+}
+
 
 
 
@@ -283,6 +279,7 @@ async fn replicate_to_single_node(
     let replication_request = ReplicationRequest {
         schema: request.schema.clone(),
         entries: request.entries.clone(),
+        target_node: node.clone(),
     };
 
     // Attempt to send the replication request to the node

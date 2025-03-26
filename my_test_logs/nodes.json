@@ -1,4 +1,15 @@
 {
   "nodes": [
+    {
+      "name": "test",
+      "node_url": "http://localhost:8081",
+      "description": "Cross-node registration",
+      "replication_mode": {
+        "Specific": [
+          "test_table"
+        ]
+      },
+      "shared_secret": "0c0a3a0e-34d2-4e86-af67-559eddd48a53"
+    }
   ]
 }

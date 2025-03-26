@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs::{OpenOptions, File};
 use std::io::{Write, Result as IoResult};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,19 @@ pub enum ChangeType {
     Delete,
     Drop,
 }
+
+impl fmt::Display for ChangeType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChangeType::Insert => write!(f, "Insert"),
+            ChangeType::Update => write!(f, "Update"),
+            ChangeType::Delete => write!(f, "Delete"),
+            ChangeType::Create => write!(f, "Create"),
+            ChangeType::Drop => write!(f, "Drop"),
+        }
+    }
+}
+
 
 /// Struct to represent a change log entry
 #[derive(serde::Serialize,serde::Deserialize, Debug, Clone)]

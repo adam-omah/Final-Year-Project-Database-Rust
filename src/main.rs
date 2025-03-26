@@ -4,7 +4,7 @@ use std::env;
 use actix_files::Files;
 use std::io::{Result};
 use std::string::String;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::log::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -33,7 +33,6 @@ pub mod executer;
 pub mod change_logging;
 pub mod recovery;
 pub mod replication;
-mod global_state;
 
 // public constants
 pub const DB_DIR: &str = "my_rust_db";
@@ -50,6 +49,9 @@ pub struct AppState {
     pub passive_replication_queue: Arc<Mutex<PassiveReplicationQueue>>,
     pub passive_replication_service: Arc<Mutex<PassiveReplicationService>>,
 }
+
+static GLOBAL_APP_STATE: OnceLock<Arc<Mutex<Option<AppState>>>> = OnceLock::new();
+
 
 impl AppState {
     pub fn new(
@@ -87,6 +89,22 @@ impl AppState {
             config
         );
     }
+
+    pub fn set_global_state(self) {
+        // Initialize the global state if it's not already set
+        GLOBAL_APP_STATE.get_or_init(|| Arc::new(Mutex::new(Some(self))));
+    }
+
+
+    // Method to get the global app state
+    pub fn global_state() -> Option<Arc<AppState>> {
+        if let Some(global) = GLOBAL_APP_STATE.get() {
+            global.lock().unwrap().as_ref().map(|state| Arc::new(state.clone()))
+        } else {
+            None
+        }
+    }
+
 }
 
 
@@ -135,7 +153,15 @@ async fn main() -> std::io::Result<()> {
         log_recovery_manager
     );
 
+    // Set as global state
+    app_state.clone().set_global_state();
 
+    // Verify global state was set correctly
+    if let Some(_global_state) = AppState::global_state() {
+        info!("Global application state initialized successfully");
+    } else {
+        panic!("Failed to initialize global application state");
+    }
 
 
     // Start the Actix Web HTTP server

@@ -8,12 +8,14 @@ use std::{fs, io};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use actix_web::rt::Runtime;
 use awc::Client;
 use futures::future::join_all;
 use tracing::log::{error, info};
 use crate::AppState;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 use crate::config::database_config::DatabaseConfig;
+use crate::records::table::recalculate_table_global;
 use crate::recovery::recovery::LogRecoveryManager;
 use crate::replication::passive_replication::{get_replication_queue_status, queue_passive_replication};
 use crate::replication::replication_nodes::{load_nodes, ReplicationMode, ReplicationNode};
@@ -47,7 +49,7 @@ async fn append_and_action_log(app_state: &web::Data<AppState>, entry: &ChangeLo
     append_to_file(&log_file_path, &serialized_entry)?;
 
     // Now directly action the change similar to recovery
-    action_log_entry(log_manager, entry)
+    action_log_entry(log_manager, entry).await
 }
 
 // Helper checking if the log is already present to avoid duplication
@@ -80,7 +82,7 @@ fn append_to_file(file_path: &std::path::PathBuf, content: &str) -> Result<(), s
 }
 
 // This logic mimics recovery's log handling, actions changes directly.
-fn action_log_entry(log_manager: &LogRecoveryManager, entry: &ChangeLogEntry) -> Result<(), io::Error> {
+async fn action_log_entry(log_manager: &LogRecoveryManager, entry: &ChangeLogEntry) -> Result<(), io::Error> {
     let db_config = &log_manager.config;
     let table_dir = &db_config.table_dir;
     let db_dir = &db_config.db_dir;
@@ -103,12 +105,15 @@ fn action_log_entry(log_manager: &LogRecoveryManager, entry: &ChangeLogEntry) ->
     match entry.change_type {
         ChangeType::Insert =>
             log_manager.handle_row_insertion(&initial_table_path, &entry_value)
+                .await
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
         ChangeType::Update =>
             log_manager.handle_row_update(&updates_table_path, &entry_value)
+                .await
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
         ChangeType::Delete =>
             log_manager.handle_row_deletion(&updates_table_path, &entry_value)
+                .await
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
         ChangeType::Create =>
             log_manager.handle_table_creation(&initial_table_path, &updates_table_path, &entry_value)

@@ -13,7 +13,7 @@ use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use tracing::log::{debug, error, info};
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
-use crate::records::table::{get_table_data, recalculate_table, refresh_all_tables};
+use crate::records::table::{get_table_data, recalculate_table, recalculate_table_global, refresh_all_tables};
 use crate::schema::schema;
 use crate::schema::schema::{load_schema, refresh_schema, save_schema};
 
@@ -28,7 +28,7 @@ impl LogRecoveryManager {
         LogRecoveryManager { config }
     }
     /// Main recovery process
-    pub fn recover_database_state(&self) -> Result<()> {
+    pub async fn recover_database_state(&self) -> Result<()> {
         // Read all log entries
         let log_entries = self.read_log_entries()?;
 
@@ -48,7 +48,7 @@ impl LogRecoveryManager {
 
         // Process logs for each table
         for (table_name, logs) in table_logs {
-            self.process_table_recovery(&table_name, logs)?;
+            self.process_table_recovery(&table_name, logs).await?;
         }
 
         Ok(())
@@ -84,7 +84,7 @@ impl LogRecoveryManager {
     }
 
     /// Process recovery for a specific table
-    fn process_table_recovery(&self, table_name: &str, logs: Vec<Value>) -> Result<()> {
+    async fn process_table_recovery(&self, table_name: &str, logs: Vec<Value>) -> Result<()> {
         // Determine the correct files based on table name
         let initial_table_path = format!(
             "{}/{}/{}_initial",
@@ -108,19 +108,19 @@ impl LogRecoveryManager {
             match change_type {
                 "Create" => {
                     // Handle table creation (might involve creating initial table file)
-                    self.handle_table_creation(&initial_table_path, &updates_table_path,&log)?;
+                    self.handle_table_creation(&initial_table_path, &updates_table_path, &log)?;
                 },
                 "Insert" => {
                     // Append to initial table and updates table
-                    self.handle_row_insertion(&initial_table_path, &log)?;
+                    self.handle_row_insertion(&initial_table_path, &log).await?;
                 },
                 "Update" => {
                     // Append to updates table
-                    self.handle_row_update(&updates_table_path, &log)?;
+                    self.handle_row_update(&updates_table_path, &log).await?;
                 },
                 "Delete" => {
                     // Append to updates table
-                    self.handle_row_deletion(&updates_table_path, &log)?;
+                    self.handle_row_deletion(&updates_table_path, &log).await?;
                 },
                 "Drop" => {
                     self.handle_drop_table(&initial_table_path, &updates_table_path, &log)?;
@@ -130,7 +130,6 @@ impl LogRecoveryManager {
                 }
             }
         }
-
         Ok(())
     }
 
@@ -236,9 +235,9 @@ impl LogRecoveryManager {
     }
 
     /// Handle row insertion
-    pub(crate) fn handle_row_insertion(&self,
-                                       initial_table_path: &str,
-                                       log: &Value
+    pub(crate) async fn handle_row_insertion(&self,
+                                             initial_table_path: &str,
+                                             log: &Value
     ) -> Result<()> {
         info!("Log given to insert: {}", log);
         info!("row data: {}", log["data"]["row_data"]);
@@ -270,11 +269,24 @@ impl LogRecoveryManager {
         // Append to initial table if UUID is not found
         self.append_to_file(initial_table_path, &row_csv)?;
 
+        // Extract table name from path
+        let table_name = Path::new(initial_table_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.replace("_initial", ""))
+            .context("Failed to extract table name from path")?;
+
+        // Recalculate Table
+        match self.recalculate_after_change(&table_name).await {
+            Ok(_) => {},
+            Err(e) => error!("Failed to recalculate table after insert: {}", e)
+        }
+
         Ok(())
     }
 
     /// Handle row update
-    pub(crate) fn handle_row_update(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
+    pub(crate) async fn handle_row_update(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
         // Get row data
         let row_data = log["data"]["row_data"].as_array()
             .context("Invalid row data")?;
@@ -317,6 +329,21 @@ impl LogRecoveryManager {
         }
         // Append to updates table if no matching update is found
         self.append_to_file(updates_table_path, &row_csv)?;
+
+        // Extract table name from path
+        let table_name = Path::new(updates_table_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.replace("_updates", ""))
+            .context("Failed to extract table name from path")?;
+
+        // Recalculate Table
+        match self.recalculate_after_change(&table_name).await {
+            Ok(_) => {},
+            Err(e) => error!("Failed to recalculate table after update: {}", e)
+        }
+
+
         Ok(())
     }
 
@@ -359,7 +386,7 @@ impl LogRecoveryManager {
 
 
     /// Handle row deletion
-    pub(crate) fn handle_row_deletion(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
+    pub(crate) async fn handle_row_deletion(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
         // Get row data
         let row_data = log["data"]["row_data"].as_array()
             .context("Invalid row data")?;
@@ -411,6 +438,19 @@ impl LogRecoveryManager {
 
         // Append to updates table if no matching delete is found
         self.append_to_file(updates_table_path, &row_csv)?;
+
+        // Extract table name from path
+        let table_name = Path::new(updates_table_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.replace("_updates", ""))
+            .context("Failed to extract table name from path")?;
+
+        // Recalculate Table
+        match self.recalculate_after_change(&table_name).await {
+            Ok(_) => {},
+            Err(e) => error!("Failed to recalculate table after deletion: {}", e)
+        }
 
         Ok(())
     }
@@ -476,8 +516,28 @@ impl LogRecoveryManager {
         None
     }
 
+    pub async fn recalculate_after_change(&self, table_name: &str) -> Result<()> {
+        info!("Recalculating table {} after applying changes", table_name);
 
-    fn recover_database_state_since(&self, since_timestamp: DateTime<Utc>) -> Result<()> {
+        // Use actix-web runtime to handle the async operation
+        let table_name_owned = table_name.to_string();
+
+        actix_web::rt::spawn(async move {
+            match recalculate_table_global(&table_name_owned).await {
+                Ok(_) => {
+                    info!("Successfully recalculated table {}", table_name_owned);
+                },
+                Err(e) => {
+                    error!("Failed to recalculate table {}: {}", table_name_owned, e);
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+
+    async fn recover_database_state_since(&self, since_timestamp: DateTime<Utc>) -> Result<()> {
         info!("Recovering database state since: {}", since_timestamp);
 
         // Read all log entries
@@ -532,26 +592,27 @@ impl LogRecoveryManager {
                 a_time.cmp(&b_time)
             });
             // Process table recovery
-            self.process_table_recovery(&table_name, sorted_logs)?;
+            self.process_table_recovery(&table_name, sorted_logs).await?;
         }
         Ok(())
     }
 
     // An overloaded version for convenience (Duration)
-    fn recover_database_state_since_duration(&self, duration: Duration) -> Result<()> {
+    async fn recover_database_state_since_duration(&self, duration: Duration) -> Result<()> {
         let since_timestamp = Utc::now() - duration;
-        self.recover_database_state_since(since_timestamp)
+        self.recover_database_state_since(since_timestamp).await
     }
 
 }
 
 /// Public function to run recovery
-pub fn run_log_recovery(config: &DatabaseConfig) -> Result<()> {
+pub async fn run_log_recovery(config: &DatabaseConfig) -> Result<()> {
     let recovery_manager = LogRecoveryManager::new(config.clone());
-    recovery_manager.recover_database_state()
+    recovery_manager.recover_database_state().await
 }
 
-fn recover_specific_table(config: &DatabaseConfig ,table_name: &str) -> Result<()> {
+
+async fn recover_specific_table(config: &DatabaseConfig ,table_name: &str) -> Result<()> {
     let recovery_manager = LogRecoveryManager::new(config.clone());
 
     // Read log entries
@@ -568,7 +629,7 @@ fn recover_specific_table(config: &DatabaseConfig ,table_name: &str) -> Result<(
         .collect();
 
     // Process recovery for specific table
-    recovery_manager.process_table_recovery(table_name, table_specific_logs)?;
+    recovery_manager.process_table_recovery(table_name, table_specific_logs).await?;
 
     Ok(())
 }
@@ -588,7 +649,7 @@ pub async fn trigger_log_recovery(
 ) -> impl Responder {
     refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
     // Perform log recovery
-    match run_log_recovery(&app_state.config) {
+    match run_log_recovery(&app_state.config).await {
         Ok(_) => {
             refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
             if let Err(e) = refresh_all_tables(&app_state).await {
@@ -628,7 +689,7 @@ pub async fn trigger_specific_table_recovery(
     refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
     let table_name = path.into_inner();
     // Perform table-specific recovery
-    match recover_specific_table(&app_state.config, &table_name) {
+    match recover_specific_table(&app_state.config, &table_name).await {
         Ok(_) => {
             refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
             // refresh Specific Table Only
@@ -682,10 +743,10 @@ pub async fn trigger_time_based_recovery(
                     "message": "Invalid timestamp format"
                 }))
             };
-            recovery_manager.recover_database_state_since(timestamp)
+            recovery_manager.recover_database_state_since(timestamp).await
         },
         (None, Some(hours)) => {
-            recovery_manager.recover_database_state_since_duration(Duration::hours(hours as i64))
+            recovery_manager.recover_database_state_since_duration(Duration::hours(hours as i64)).await
         },
         _ => {
             return HttpResponse::BadRequest().json(json!({

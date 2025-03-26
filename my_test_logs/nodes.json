@@ -1,11 +1,4 @@
 {
   "nodes": [
-    {
-      "name": "test_db",
-      "node_url": "http://localhost:8081",
-      "description": "testing",
-      "replication_mode": "All",
-      "shared_secret": "08701ac6-af82-4868-913a-7be751eec183"
-    }
   ]
 }

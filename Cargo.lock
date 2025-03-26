@@ -13,6 +13,7 @@ dependencies = [
  "cargo-sonar",
  "chrono",
  "futures",
+ "lazy_static",
  "mockall",
  "regex",
  "reqwest",

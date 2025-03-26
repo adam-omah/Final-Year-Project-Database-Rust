@@ -703,6 +703,32 @@ pub async fn recalculate_table(
     Ok(())
 }
 
+// Wrapper for calling global recalculate table
+pub async fn recalculate_table_global(table_name: &str) -> Result<()> {
+    // Get the global app state
+    let global_state = AppState::global_state()
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Global application state not initialized"
+        ))?;
+
+    // Create a web::Data wrapper to match the expected parameter type
+    let state = web::Data::new((*global_state).clone());
+
+    // Get the initial table path
+    let initial_table_name = format!("{}_initial", table_name);
+    let initial_table_path = Path::new(&state.config.db_dir)
+        .join(&state.config.table_dir)
+        .join(&initial_table_name);
+
+    // Load the initial data
+    let initial_data = load_table_data_from_file(&initial_table_path)?;
+
+    // Call the original function with the retrieved state and initial data
+    recalculate_table(&state, table_name, initial_data).await
+}
+
+
 fn merge_table_and_update(
     initial_table_data: Vec<Vec<String>>,
     updates_data: Vec<Vec<String>>,

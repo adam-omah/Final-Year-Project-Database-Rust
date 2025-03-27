@@ -49,3 +49,8 @@ Pushing to docker Hub:
 ``
 docker push adam0mah/rust-db-engine:test-ver-1
 ``
+
+Testing replication with docker compose:
+- **From node1 to node2**: `http://node2:8082`
+- **From node2 to node1**: `http://node1:8081`
+

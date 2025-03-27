@@ -181,8 +181,17 @@ async fn replicate_to_single_node(
     node: &ReplicationNode,
     request: &ReplicationRequest,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    let addrs = node.resolve_node_url().map_err(|e| e.to_string())?;
+    let target_addr = addrs.first().ok_or("Could not resolve any addresses")?;
+    let url = if node.node_url.starts_with("https") {
+        format!("https://{}/api/replication/push", target_addr)
+    } else {
+        format!("http://{}/api/replication/push", target_addr)
+    };
+
+    // Now use target_addr for awc requests
     let mut response = client
-        .post(&format!("{}/api/replication/push", node.node_url))
+        .post(url)
         .send_json(request)
         .await?;
 

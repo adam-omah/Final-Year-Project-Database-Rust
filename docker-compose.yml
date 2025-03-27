@@ -1,0 +1,22 @@
+version: '3'
+
+services:
+  node1:
+    image: final-year-project-database-rust
+    container_name: database-node-1
+    environment:
+      - PORT=8081
+      - NODE_NAME=node1
+      - PEER_NODES=http://node2:8082
+    ports:
+      - "8081:8081"
+
+  node2:
+    image: final-year-project-database-rust
+    container_name: database-node-2
+    environment:
+      - PORT=8082
+      - NODE_NAME=node2
+      - PEER_NODES=http://node1:8081
+    ports:
+      - "8082:8082"

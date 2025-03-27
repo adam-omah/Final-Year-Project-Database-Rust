@@ -1,14 +1,17 @@
 use std::{fs, io};
 use std::fs::File;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use actix_web::{get, post, web, HttpResponse, Responder};
 use actix_web::web::Data;
 use awc::Client;
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::log::info;
+use tracing::log::{debug, error, info};
 use uuid::Uuid;
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
+use crate::replication::active_replication::ReplicationRequest;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ReplicationMode {
@@ -24,6 +27,47 @@ pub struct ReplicationNode {
     pub replication_mode: ReplicationMode,
     pub shared_secret: String,
 }
+
+impl ReplicationNode {
+    pub(crate) fn resolve_node_url(&self) -> Result<Vec<SocketAddr>, std::io::Error> {
+        debug!("Attempting to resolve socket addresses {}", self.node_url);
+
+        // Parse the URL to extract just the host and port
+        let url_str = &*self.node_url;
+        let socket_addr = if url_str.starts_with("http://") || url_str.starts_with("https://") {
+            // Extract host:port from URL
+            let without_scheme = url_str.split("://").nth(1).unwrap_or(url_str);
+            // Remove path if present
+            let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+            host_port
+        } else {
+            // Assume already in host:port format
+            url_str
+        };
+
+        match socket_addr.to_socket_addrs() {
+            Ok(iter) => {
+                let addresses: Vec<SocketAddr> = iter.collect();
+                debug!("Resolved socket addresses count {}", addresses.len());
+
+                if addresses.is_empty() {
+                    error!("No socket addresses could be resolved {}", self.node_url);
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("No addresses found for {}", self.node_url)
+                    ))
+                } else {
+                    Ok(addresses)
+                }
+            },
+            Err(e) => {
+                error!("Failed to resolve socket addresses {} {}", self.node_url, e);
+                Err(e)
+            }
+        }
+    }
+}
+
 
 #[derive(Serialize, Deserialize)]
 pub struct CrossNodeRegistrationRequest {
@@ -268,7 +312,13 @@ pub async fn cross_node_register(
 
 async fn register_with_target_node(source_node: &ReplicationNode, app_state: Data<AppState>) -> Result<CrossNodeRegistrationResponse, String> {
     // Construct full URL for the target node's registration endpoint
-    let target_url = format!("{}/api/register-node", source_node.node_url);
+    let addrs = source_node.resolve_node_url().map_err(|e| e.to_string())?;
+    let target_addr = addrs.first().ok_or("Could not resolve any addresses")?;
+    let target_url = if source_node.node_url.starts_with("https") {
+        format!("https://{}/api/register-node", target_addr)
+    } else {
+        format!("http://{}/api/register-node", target_addr)
+    };
 
     // Create an async client
     let client = Client::default();

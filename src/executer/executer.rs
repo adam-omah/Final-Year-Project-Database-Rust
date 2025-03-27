@@ -224,9 +224,12 @@ async fn handle_insert(
             )
         };
 
-        // Insert the row into the table
+        // Insert the row into the table and get back the UUID
         match insert_row(table_name, row_data, data, column_names).await {
-            Ok(_) => HttpResponse::Ok().json(serde_json::json!({ "message": "Row inserted" })),
+            Ok(uuid) => HttpResponse::Ok().json(serde_json::json!({
+                "message": "Row inserted",
+                "uuid": uuid
+            })),
             Err(err) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error inserting row: {}", err)})),
         }
     } else {

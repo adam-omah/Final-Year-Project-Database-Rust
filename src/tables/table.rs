@@ -28,7 +28,7 @@ pub async fn insert_row(
     row_data: Vec<String>,
     state: &web::Data<AppState>,
     column_names: Option<Vec<String>>, // Add column names here
-) -> Result<()> {
+) -> Result<String> {
     // Acquire schema lock and clone it
     let schema_snapshot = {
         let schema_guard = state.schema.lock().unwrap();
@@ -151,6 +151,14 @@ pub async fn insert_row(
     // Add the validated row directly to the cache
     add_row_to_cache(table_name, cache_row.clone(), state).await?;
 
+    let uuid_to_return = row_data_map.get("UUID")
+        .ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "UUID not found in row data".to_string()
+        ))?
+        .clone();
+
+
     let log_entry = state.change_logger.log_change(
         None,
         ChangeType::Insert,
@@ -165,7 +173,7 @@ pub async fn insert_row(
     // Replicate explicitly AFTER your successful log occurring clearly here:
     replicate_change_to_nodes(Arc::from(state.get_ref().clone()), log_entry);
 
-    Ok(())
+    Ok(uuid_to_return)
 }
 
 

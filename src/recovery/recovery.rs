@@ -13,7 +13,7 @@ use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use tracing::log::{debug, error, info};
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
-use crate::records::table::{get_table_data, recalculate_table, recalculate_table_global, refresh_all_tables};
+use crate::tables::table::{get_table_data, recalculate_table, recalculate_table_global, refresh_all_tables};
 use crate::schema::schema;
 use crate::schema::schema::{global_drop_table_from_cache, global_refresh_schema, load_schema, refresh_schema, save_schema};
 

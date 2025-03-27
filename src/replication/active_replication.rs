@@ -16,7 +16,7 @@ use tracing::log::{error, info};
 use crate::AppState;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 use crate::config::database_config::DatabaseConfig;
-use crate::records::table::recalculate_table_global;
+use crate::tables::table::recalculate_table_global;
 use crate::recovery::recovery::LogRecoveryManager;
 use crate::replication::passive_replication::{get_replication_queue_status, queue_passive_replication};
 use crate::replication::replication_nodes::{load_nodes, ReplicationMode, ReplicationNode};

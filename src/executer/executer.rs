@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use crate::query::parser::{sql_parser, ASTNode, Expression, Identifier};
-use crate::records::table::{create_table, delete_row, get_table_at_timestamp, get_table_data, insert_row, load_table_data_from_file, recalculate_table, update_row};
+use crate::tables::table::{create_table, delete_row, get_table_at_timestamp, get_table_data, insert_row, load_table_data_from_file, recalculate_table, update_row};
 use crate::schema::schema;
 use crate::schema::schema::{drop_table, get_column_names_from_schema};
 use crate::{AppState};
@@ -10,7 +10,7 @@ use tracing::log::{debug, info};
 use uuid::Uuid;
 use regex::Regex;
 use serde_json::json;
-use crate::records::table::extract_literal_value;
+use crate::tables::table::extract_literal_value;
 
 pub async fn execute_query(
     ast_nodes: Vec<ASTNode>,

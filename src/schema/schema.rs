@@ -14,7 +14,7 @@ use regex::Regex;
 use crate::change_logging::change_logging::{ChangeLogger, ChangeType};
 use crate::executer::executer::evaluate_where_clause;
 use crate::query::parser::{Expression, Identifier};
-use crate::records::table::{get_column_values};
+use crate::tables::table::{get_column_values};
 use crate::replication::active_replication::replicate_change_to_nodes;
 
 // Data types for columns.

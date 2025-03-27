@@ -10,7 +10,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use crate::executer::executer::execute_query_endpoint;
 use crate::config::database_config::DatabaseConfig;
-use crate::records::table::{get_column_names_api, get_table_api, get_table_at_timestamp_api, list_tables_api};
+use crate::tables::table::{get_column_names_api, get_table_api, get_table_at_timestamp_api, list_tables_api};
 use schema::{
     schema::load_schema,
     schema::Schema,
@@ -27,7 +27,7 @@ use crate::replication::replication_nodes::configure_node_routes;
 // Module Imports.
 pub mod config;
 pub mod schema;
-pub mod records;
+pub mod tables;
 pub mod query;
 pub mod executer;
 pub mod change_logging;
@@ -220,7 +220,7 @@ mod app_tests {
     use actix_web::test;
     use serde_json::Value;
     use schema::{schema::load_schema, schema::Column, schema::Table};
-    use records::{table::create_table, table::insert_row};
+    use tables::{table::create_table, table::insert_row};
 
     #[actix_web::test]
     pub async fn test_application() -> Result<()> {

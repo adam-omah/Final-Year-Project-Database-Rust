@@ -89,6 +89,7 @@ pub struct ReplicationConfig {
     pub max_offline_duration: i64, // Seconds
     pub max_replication_attempts: u32,
     pub retry_interval: i64, // Seconds
+    pub sync_interval: u64, // Minutes - If 0, then is not configured at all
 }
 
 impl Default for ReplicationConfig {
@@ -97,6 +98,7 @@ impl Default for ReplicationConfig {
             max_offline_duration: 86400, // 24 hours in seconds
             max_replication_attempts: 3,
             retry_interval: 300, // 5 minutes in seconds
+            sync_interval: 0, // Default to disabled
         }
     }
 }

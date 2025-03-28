@@ -39,7 +39,7 @@ pub async fn trigger_replication_sync(app_state: web::Data<AppState>) -> impl Re
     }
 }
 
-async fn perform_replication_sync(app_state: web::Data<AppState>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn perform_replication_sync(app_state: web::Data<AppState>) -> Result<(), Box<dyn std::error::Error>> {
     let config = &app_state.config;
 
     // 1. Load Nodes Configuration
@@ -55,7 +55,6 @@ async fn perform_replication_sync(app_state: web::Data<AppState>) -> Result<(), 
     // Iterate through all configured nodes
     for other_node in &nodes_config.nodes {
         info!("Starting replication sync check with node: {}", other_node.name);
-
         // 2. Fetch Data from Each Node
         info!("Fetching current table data");
         let current_node_data = fetch_current_table_data(config).await?; // Fetch data from the current instance
@@ -119,13 +118,18 @@ async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig
     debug!("Fetching table data for node {} with config: {:?}", node.name, config);
 
     let client = awc::Client::default();
+    // Format API address to correct address.
+    let addrs = node.resolve_node_url().map_err(|e| e.to_string())?;
+    let target_addr = addrs.first().ok_or("Could not resolve any addresses")?;
 
     match &node.replication_mode {
         ReplicationMode::All => {
+            let tables_url = if node.node_url.starts_with("https") {
+                format!("https://{}/api/tables", target_addr)
+            } else {
+                format!("http://{}/api/tables", target_addr)
+            };
             info!("Replication Mode ALL is enabled, fetching all tables");
-
-            // Fetch the list of tables from the node's /api/tables endpoint
-            let tables_url = format!("{}/api/tables", node.node_url);
             info!("Fetching table list from: {}", tables_url);
 
             let mut table_list_response = client.get(tables_url)
@@ -139,7 +143,11 @@ async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig
 
                 // loop tables and get the data
                 for table_name in table_list.0 {
-                    let table_url = format!("{}/api/tables/{}", node.node_url, table_name);
+                    let table_url = if node.node_url.starts_with("https") {
+                        format!("https://{}/api/tables/{}", target_addr, table_name)
+                    } else {
+                        format!("http://{}/api/tables/{}", target_addr, table_name)
+                    };
                     info!("Fetching table data from: {}", table_url);
 
                     let mut response = client.get(table_url)
@@ -167,11 +175,15 @@ async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig
             }
         }
         ReplicationMode::Specific(specific_tables) => {
-            info!("Comparing specific tables: {}", specific_tables.join(", "));
+            info!("Fetching specific tables: {}", specific_tables.join(", "));
             let client = awc::Client::default();
 
             for table_name in specific_tables {
-                let table_url = format!("{}/api/tables/{}", node.node_url, table_name);
+                let table_url = if node.node_url.starts_with("https") {
+                    format!("https://{}/api/tables/{}", target_addr, table_name)
+                } else {
+                    format!("http://{}/api/tables/{}", target_addr, table_name)
+                };
                 info!("Fetching table data from: {}", table_url);
 
                 let response = client.get(table_url)
@@ -190,33 +202,14 @@ async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig
                                 .collect();
 
                             table_data.insert(table_name.clone(), table_values);
-                        } else if response.status().as_u16() == 404 {
-                            warn!("Table {} not found on node {}", table_name, node.name);
-                            // Fetch logs and compare
-                            let logs1 = fetch_logs_from_node(node, config, table_name).await?; //get logs from other node and push to current to resolve
-                            let logs2 = fetch_current_logs(config, table_name).await?;  // get the current logs, so we can compare and determine what needs to be pushed.
-
-                            // Identify the differing ChangeLogEntry items
-                            let diff_entries = compare_logs(logs1.clone(), logs2.clone(), table_name);
-
-                            // Replicate the changes to node2.  Add logic here for direction.
-                            if should_replicate_to_node(logs1.clone(),logs2.clone()){
-                                info!("Pushing changes to {}", node.name);
-                                replicate_changes_to_node(Arc::from(AppState::global_state().unwrap().clone()), node, diff_entries).await?;
-                            }
-                            else{
-                                info!("Requesting changes from {}", node.name);
-                                replicate_changes_from_node(Arc::from(AppState::global_state().unwrap().clone()), node, diff_entries).await?;
-                            }
-                        }
-                        else {
-                            error!("Failed to fetch table data from {}: {}", node.node_url, response.status());
+                        } else {
+                            info!("Failed to fetch table data from {}: {}", node.node_url, response.status());
                             // Consider whether to continue or return an error
                         }
                     }
                     Err(e) => {
-                        error!("Failed to send request to {}: {}", node.node_url, e);
-                        // Consider whether to continue or return an error
+                        info!("Failed to send request to {}: {}", node.node_url, e);
+                        return Err(format!("Failed to fetch table list: {}", e).into());
                     }
                 }
             }
@@ -235,55 +228,180 @@ async fn compare_node_data_and_replicate(
     current_node_data: &TableData,
     other_node_data: &TableData,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Iterate through the tables present in current_node_data
-    for (table_name, data1) in current_node_data.iter() {
-        if let Some(data2) = other_node_data.get(table_name) {
-            info!("Comparing table {} on current node and node {}", table_name, other_node.name);
-
-            // Compare the data
-            if data1 != data2 {
-                warn!("Data mismatch found in table {} between current node and node {}", table_name, other_node.name);
-
-                // Fetch logs and compare
-                let logs1 = fetch_current_logs(&app_state.config, table_name).await?;  // get the current logs, so we can compare and determine what needs to be pushed.
-                let logs2 = match fetch_logs_from_node(other_node, &app_state.config, table_name).await {
-                    Ok(logs) => logs,
-                    Err(_) => Vec::new(), // Assume 0 logs if fetching fails
-                };
-
-                // Identify the differing ChangeLogEntry items
-                let diff_entries = compare_logs(logs1.clone(), logs2.clone(), table_name);
-
-                // Replicate the changes to node2.  Add logic here for direction.
-                if should_replicate_to_node(logs1.clone(),logs2.clone()){
-                    info!("Pushing changes to {}", other_node.name);
-                    replicate_changes_to_node(app_state.clone(), other_node, diff_entries).await?;
-                }
-                else{
-                    info!("Requesting changes from {}", other_node.name);
-                    replicate_changes_from_node(app_state.clone(), other_node, diff_entries).await?;
-                }
-
+    match &other_node.replication_mode {
+        ReplicationMode::All => {
+            // Determine which set of table names to use for iteration
+            let table_names = if current_node_data.len() < other_node_data.len() {
+                // If the current node has fewer tables, use the other node's table names
+                other_node_data.keys().cloned().collect::<Vec<_>>()
             } else {
-                info!("No data mismatch found in table {} between current node and node {}", table_name, other_node.name);
-            }
-        } else {
-            warn!("Table {} not found on node {}", table_name, other_node.name);
-            // Fetch logs and compare
-            let logs1 = fetch_current_logs(&app_state.config, table_name).await?;  // get the current logs, so we can compare and determine what needs to be pushed.
-            let logs2 = fetch_logs_from_node(other_node, &app_state.config, table_name).await.unwrap_or_else(|_| Vec::new());
+                // Otherwise, use the current node's table names
+                current_node_data.keys().cloned().collect::<Vec<_>>()
+            };
 
-            // Identify the differing ChangeLogEntry items
-            let diff_entries = compare_logs(logs1.clone(), logs2.clone(), table_name);
+            // Iterate through the tables
+            for table_name in table_names {
+                let data1 = current_node_data.get(&table_name);
+                let data2 = other_node_data.get(&table_name);
 
-            // Replicate the changes to node2.  Add logic here for direction.
-            if should_replicate_to_node(logs1.clone(),logs2.clone()){
-                info!("Pushing changes to {}", other_node.name);
-                replicate_changes_to_node(app_state.clone(), other_node, diff_entries).await?;
+                match (data1, data2) {
+                    (Some(data1), Some(data2)) => {
+                        info!("Comparing table {} on current node and node {}", table_name, other_node.name);
+
+                        // Compare the data
+                        if data1 != data2 {
+                            warn!("Data mismatch found in table {} between current node and node {}", table_name, other_node.name);
+
+                            // Fetch logs and compare
+                            let logs1 = fetch_current_logs(&app_state.config, &table_name).await?;
+                            let logs2 = match fetch_logs_from_node(other_node, &app_state.config, &table_name).await {
+                                Ok(logs) => logs,
+                                Err(_) => Vec::new(), // Assume 0 logs if fetching fails
+                            };
+
+                            // Identify the differing ChangeLogEntry items
+                            let diff_entries = compare_logs(logs1.clone(), logs2.clone(), &table_name);
+
+                            // Replicate the changes to node2.  Add logic here for direction.
+                            if should_replicate_to_node(logs1.clone(), logs2.clone()) {
+                                info!("Pushing changes to {}", other_node.name);
+                                replicate_changes_to_node(app_state.clone(), other_node, diff_entries).await?;
+                            } else {
+                                info!("Requesting changes from {}", other_node.name);
+                                replicate_changes_from_node(other_node).await?;
+                                break;
+                            }
+                        } else {
+                            info!("No data mismatch found in table {} between current node and node {}", table_name, other_node.name);
+                        }
+                    }
+                    (Some(_), None) => {
+                        warn!("Table {} not found on node {}", table_name, other_node.name);
+                        // Table exists on current node but not on the other node
+                        let logs1 = fetch_current_logs(&app_state.config, &table_name).await?;
+                        let logs2 = Vec::new(); // No logs to fetch from the other node
+
+                        // Identify the differing ChangeLogEntry items
+                        let diff_entries = compare_logs(logs1.clone(), logs2.clone(), &table_name);
+
+                        // Replicate the changes to node2.  Add logic here for direction.
+                        if should_replicate_to_node(logs1.clone(), logs2.clone()) {
+                            info!("Pushing changes to {}", other_node.name);
+                            replicate_changes_to_node(app_state.clone(), other_node, diff_entries).await?;
+                        } else {
+                            info!("Requesting changes from {}", other_node.name);
+                            replicate_changes_from_node(other_node).await?;
+                            break;
+                        }
+                    }
+                    (None, Some(_)) => {
+                        warn!("Table {} not found on current node", table_name);
+                        // Table exists on the other node but not on the current node
+                        let logs1 = Vec::new(); // No logs to fetch from the current node
+                        let logs2 = match fetch_logs_from_node(other_node, &app_state.config, &table_name).await {
+                            Ok(logs) => logs,
+                            Err(_) => Vec::new(), // Assume 0 logs if fetching fails
+                        };
+
+                        // Identify the differing ChangeLogEntry items
+                        let diff_entries = compare_logs(logs1.clone(), logs2.clone(), &table_name);
+
+                        // Replicate the changes to node2.  Add logic here for direction.
+                        if should_replicate_to_node(logs1.clone(), logs2.clone()) {
+                            info!("Pushing changes to {}", other_node.name);
+                            replicate_changes_to_node(app_state.clone(), other_node, diff_entries).await?;
+                        } else {
+                            info!("Requesting changes from {}", other_node.name);
+                            replicate_changes_from_node(other_node).await?;
+                            break;
+                        }
+                    }
+                    (None, None) => {
+                        info!("Table {} not found on either node", table_name);
+                    }
+                }
             }
-            else{
-                info!("Requesting changes from {}", other_node.name);
-                replicate_changes_from_node(app_state.clone(), other_node, diff_entries).await?;
+        }
+        ReplicationMode::Specific(specific_tables) => {
+            // Iterate through the specific tables defined in the node's configuration
+            for table_name in specific_tables {
+                let data1 = current_node_data.get(table_name);
+                let data2 = other_node_data.get(table_name);
+
+                match (data1, data2) {
+                    (Some(data1), Some(data2)) => {
+                        info!("Comparing table {} on current node and node {}", table_name, other_node.name);
+
+                        // Compare the data
+                        if data1 != data2 {
+                            warn!("Data mismatch found in table {} between current node and node {}", table_name, other_node.name);
+
+                            // Fetch logs and compare
+                            let logs1 = fetch_current_logs(&app_state.config, table_name).await?;
+                            let logs2 = match fetch_logs_from_node(other_node, &app_state.config, table_name).await {
+                                Ok(logs) => logs,
+                                Err(_) => Vec::new(), // Assume 0 logs if fetching fails
+                            };
+
+                            // Identify the differing ChangeLogEntry items
+                            let diff_entries = compare_logs(logs1.clone(), logs2.clone(), table_name);
+
+                            // Replicate the changes to node2.  Add logic here for direction.
+                            if should_replicate_to_node(logs1.clone(), logs2.clone()) {
+                                info!("Pushing changes to {}", other_node.name);
+                                replicate_changes_to_node(app_state.clone(), other_node, diff_entries).await?;
+                            } else {
+                                info!("Requesting changes from {}", other_node.name);
+                                replicate_changes_from_node(other_node).await?;
+                                break;
+                            }
+                        } else {
+                            info!("No data mismatch found in table {} between current node and node {}", table_name, other_node.name);
+                        }
+                    }
+                    (Some(_), None) => {
+                        warn!("Table {} not found on node {}", table_name, other_node.name);
+                        // Table exists on current node but not on the other node
+                        let logs1 = fetch_current_logs(&app_state.config, table_name).await?;
+                        let logs2 = Vec::new(); // No logs to fetch from the other node
+
+                        // Identify the differing ChangeLogEntry items
+                        let diff_entries = compare_logs(logs1.clone(), logs2.clone(), table_name);
+
+                        // Replicate the changes to node2.  Add logic here for direction.
+                        if should_replicate_to_node(logs1.clone(), logs2.clone()) {
+                            info!("Pushing changes to {}", other_node.name);
+                            replicate_changes_to_node(app_state.clone(), other_node, diff_entries).await?;
+                        } else {
+                            info!("Requesting changes from {}", other_node.name);
+                            replicate_changes_from_node(other_node).await?;
+                        }
+                    }
+                    (None, Some(_)) => {
+                        warn!("Table {} not found on current node", table_name);
+                        // Table exists on the other node but not on the current node
+                        let logs1 = Vec::new(); // No logs to fetch from the current node
+                        let logs2 = match fetch_logs_from_node(other_node, &app_state.config, table_name).await {
+                            Ok(logs) => logs,
+                            Err(_) => Vec::new(), // Assume 0 logs if fetching fails
+                        };
+
+                        // Identify the differing ChangeLogEntry items
+                        let diff_entries = compare_logs(logs1.clone(), logs2.clone(), table_name);
+
+                        // Replicate the changes to node2.  Add logic here for direction.
+                        if should_replicate_to_node(logs1.clone(), logs2.clone()) {
+                            info!("Pushing changes to {}", other_node.name);
+                            replicate_changes_to_node(app_state.clone(), other_node, diff_entries).await?;
+                        } else {
+                            info!("Requesting changes from {}", other_node.name);
+                            replicate_changes_from_node(other_node).await?;
+                        }
+                    }
+                    (None, None) => {
+                        info!("Table {} not found on either node", table_name);
+                    }
+                }
             }
         }
     }
@@ -298,36 +416,42 @@ fn should_replicate_to_node(logs1: Vec<ChangeLogEntry>, logs2: Vec<ChangeLogEntr
 }
 
 async fn replicate_changes_from_node(
-    app_state: Arc<AppState>,
     node: &ReplicationNode,
-    diff_entries: Vec<ChangeLogEntry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Requesting {} changes from node {}", diff_entries.len(), node.name);
+    info!("Requesting sync from node {}", node.name);
 
-    // Create a ReplicationRequest
-    let replication_request = ReplicationRequest {
-        schema: app_state.schema.lock().unwrap().clone(),
-        entries: diff_entries,
-        target_node: node.clone(), // Assuming ReplicationNode is Clone
+    // Build the URL for the sync endpoint on the other node
+    let addrs = node.resolve_node_url().map_err(|e| e.to_string())?;
+    let target_addr = addrs.first().ok_or("Could not resolve any addresses")?;
+
+    let sync_url = if node.node_url.starts_with("https") {
+        format!("https://{}/api/replication/sync", target_addr)
+    } else {
+        format!("http://{}/api/replication/sync", target_addr)
     };
 
-    // Use the replicate_to_single_node function
+    info!("Triggering sync on node: {}", sync_url);
+
+    // Create an awc client
     let client = awc::Client::default();
-    match replicate_to_single_node(&client, node, &replication_request).await {
-        Ok(true) => {
-            info!("Successfully replicated changes from node {}", node.name);
-            Ok(())
-        }
-        Ok(false) => {
-            error!("Failed to replicate changes from node {}", node.name);
-            Err("Failed to replicate changes from node".into()) // Or a more specific error
-        }
-        Err(e) => {
-            error!("Error during replication from node {}: {}", node.name, e);
-            Err(e)
-        }
+
+    // Send a POST request to the sync endpoint
+    let mut response = client
+        .post(sync_url)
+        .insert_header(("User-Agent", "Actix-web"))
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        info!("Successfully triggered sync on node {}", node.name);
+        Ok(())
+    } else {
+        error!("Failed to trigger sync on node {}: {}", node.name, response.status());
+        Err(format!("Failed to trigger sync: {}", response.status()).into())
     }
 }
+
+
 
 
 // Fetch the logs from current node (the application instance where this code runs)
@@ -358,7 +482,15 @@ async fn fetch_current_logs(config: &crate::DatabaseConfig, table_name: &str) ->
 
 async fn fetch_logs_from_node(node: &ReplicationNode, config: &crate::DatabaseConfig, table_name: &str) -> Result<Vec<ChangeLogEntry>, Box<dyn std::error::Error>> {
     let client = awc::Client::default();
-    let logs_url = format!("{}/api/logs/{}", node.node_url, table_name);
+    // Format API address to correct address.
+    let addrs = node.resolve_node_url().map_err(|e| e.to_string())?;
+    let target_addr = addrs.first().ok_or("Could not resolve any addresses")?;
+
+    let logs_url = if node.node_url.starts_with("https") {
+        format!("https://{}/api/logs/{}", target_addr, table_name)
+    } else {
+        format!("http://{}/api/logs/{}", target_addr, table_name)
+    };
     info!("Fetching logs from: {}", logs_url);
 
     let response = client.get(logs_url)

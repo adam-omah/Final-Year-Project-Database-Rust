@@ -5,7 +5,11 @@ use actix_files::Files;
 use std::io::{Result};
 use std::string::String;
 use std::sync::{Arc, Mutex, OnceLock};
-use tracing::log::info;
+use actix_web::rt::spawn;
+use actix_web::rt::time::Instant;
+use actix_web::web::Data;
+use chrono::Duration;
+use tracing::log::{error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use crate::executer::executer::execute_query_endpoint;
@@ -23,7 +27,7 @@ use crate::replication::passive_replication::{
     PassiveReplicationService
 };
 use crate::replication::replication_nodes::configure_node_routes;
-use crate::replication::replication_sync_checker::configure_sync_routes;
+use crate::replication::replication_sync_checker::{configure_sync_routes, perform_replication_sync, trigger_replication_sync};
 
 // Module Imports.
 pub mod config;
@@ -163,6 +167,44 @@ async fn main() -> std::io::Result<()> {
     } else {
         panic!("Failed to initialize global application state");
     }
+
+    let sync_interval = app_state.config.replication.sync_interval;
+
+    if sync_interval > 0 {
+        info!("Starting replication sync check scheduler with interval: {} minutes", sync_interval);
+        let app_state_clone = app_state.clone(); // Clone AppState for the task
+
+        // Use actix_rt::spawn to start the scheduled task
+        spawn(async move {
+            let interval_duration = std::time::Duration::from_secs(sync_interval * 60);
+            let mut last_tick = Instant::now();
+
+            loop {
+                let now = Instant::now();
+                let elapsed = now.duration_since(last_tick);
+
+                if elapsed >= interval_duration {
+                    last_tick = now;
+                    info!("Running scheduled replication sync check at: {}", now.format("%Y-%m-%d %H:%M:%S"));
+
+                    // Retrieve the global app state
+                    if let Some(global_state) = AppState::global_state() {
+                        // Clone the global app state for the task
+                        let app_state = global_state.clone(); // Just clone the AppState
+                        // Call the function directly
+                        if let Err(e) = perform_replication_sync(Data::from(app_state)).await {
+                            error!("Scheduled replication sync check failed: {}", e);
+                        }
+                    } else {
+                        error!("Failed to retrieve global application state for scheduled sync check.");
+                    }
+                }
+            }
+        });
+    } else {
+        info!("Replication sync check scheduler is disabled (sync_interval = 0)");
+    }
+
 
 
     // Start the Actix Web HTTP server

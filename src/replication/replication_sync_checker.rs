@@ -407,7 +407,7 @@ fn compare_logs(logs1: Vec<ChangeLogEntry>, logs2: Vec<ChangeLogEntry>, table_na
 async fn replicate_changes_to_node(
     app_state: Arc<AppState>,
     node: &ReplicationNode,
-    diff_entries: Vec<ChangeLogEntry>,
+    mut diff_entries: Vec<ChangeLogEntry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Replicating {} changes to node {}", diff_entries.len(), node.name);
     trace!("Replicating these entries: {:?}", diff_entries); // Add trace log
@@ -415,9 +415,11 @@ async fn replicate_changes_to_node(
     // Create a ReplicationRequest
     let replication_request = ReplicationRequest {
         schema: app_state.schema.lock().unwrap().clone(),
-        entries: diff_entries,
+        entries: diff_entries.clone(),
         target_node: node.clone(), // Assuming ReplicationNode is Clone
     };
+
+    trace!("Replication request {:#?}", replication_request); // Add trace log
 
     // Use the replicate_to_single_node function
     let client = awc::Client::default();

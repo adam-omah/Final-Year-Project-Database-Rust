@@ -201,7 +201,7 @@ pub async fn replicate_to_single_node(
     if response.status().is_success() {
         let repl_response: ReplicationResponse = response.json().await?;
         trace!("Replication response: {:?}", repl_response); // Add trace log for the response
-        Ok(repl_response.status == "success")
+        Ok(repl_response.status == "success" || repl_response.status == "force_success") // Modified line
     } else {
         error!("HTTP error: {}", response.status()); // Add error log
         Err(format!("HTTP error: {}", response.status()).into())
@@ -233,6 +233,11 @@ async fn replication_push(
     tracing::warn!("REPLICATION PUSH RECEIVED - FULL DEBUG MODE");
     tracing::warn!("Entries Count: {}", payload.entries.len());
     tracing::warn!("Target Node: {}", payload.target_node.name);
+    // Log the entries in their full order
+    tracing::warn!("Entries to be processed:");
+    for (i, entry) in payload.entries.iter().enumerate() {
+        tracing::warn!("Entry {}: {:?}", i, entry);
+    }
 
     // Load nodes configuration
     let nodes_config = match load_nodes(&app_state.config) {
@@ -291,22 +296,21 @@ async fn replication_push(
             payload.target_node.name
         );
 
-        for entry in &payload.entries {
+        for (index, entry) in payload.entries.iter().enumerate() { // Added index for logging
             // Only process entries that are specific to this node's tables
             let should_process = match &target_node_config.replication_mode {
                 ReplicationMode::Specific(specific_tables) => {
-                    specific_tables.contains(&entry.table_name) &&
-                        matches!(entry.change_type, ChangeType::Create | ChangeType::Drop)
+                    specific_tables.contains(&entry.table_name)
                 },
-                ReplicationMode::All => {
-                    matches!(entry.change_type, ChangeType::Create | ChangeType::Drop)
-                }
+                ReplicationMode::All => true,
             };
 
             if should_process {
+                tracing::warn!("Processing entry {}: {:?}", index, entry); // Log when an entry is being processed
                 if let Err(e) = append_and_action_log(&app_state, entry).await {
                     tracing::error!(
-                        "Forced replication failed for entry: {:?}",
+                        "Forced replication failed for entry {}: {:?}", // Added index to error log
+                        index,
                         e
                     );
                     return Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
@@ -328,6 +332,8 @@ async fn replication_push(
                         }
                     }
                 }
+            } else {
+                tracing::warn!("Skipping entry {} due to replication mode: {:?}", index, entry); // Log when an entry is skipped
             }
         }
 
@@ -371,7 +377,20 @@ async fn replication_push(
 
     let replication_node = &payload.target_node;
 
-    match compare_schemas(&incoming_schema_json, &current_schema_json, Some(replication_node)) {
+    // Check if there's a CREATE or DROP entry in the payload
+    let has_create_or_drop = payload.entries.iter().any(|entry| {
+        matches!(entry.change_type, ChangeType::Create | ChangeType::Drop)
+    });
+
+    // Conditionally compare schemas
+    let schema_comparison_result =  if has_create_or_drop {
+        tracing::warn!("Skipping schema comparison due to CREATE or DROP entry");
+        Ok(true) // Skip schema comparison if CREATE or DROP is present
+    } else {
+        compare_schemas(&incoming_schema_json, &current_schema_json, Some(replication_node))
+    };
+
+    match schema_comparison_result {
         Ok(true) => {
             tracing::debug!("Proceeding with standard replication");
             drop(current_schema);

@@ -15,7 +15,7 @@ use schema::{
     schema::load_schema,
     schema::Schema,
 };
-use crate::change_logging::change_logging::ChangeLogger;
+use crate::change_logging::change_logging::{configure_logging_routes, ChangeLogger};
 use crate::recovery::recovery::{configure_recovery_routes, trigger_log_recovery, trigger_specific_table_recovery, LogRecoveryManager};
 use crate::replication::active_replication::configure_replication_routes;
 use crate::replication::passive_replication::{
@@ -23,6 +23,7 @@ use crate::replication::passive_replication::{
     PassiveReplicationService
 };
 use crate::replication::replication_nodes::configure_node_routes;
+use crate::replication::replication_sync_checker::configure_sync_routes;
 
 // Module Imports.
 pub mod config;
@@ -177,6 +178,8 @@ async fn main() -> std::io::Result<()> {
             .configure(configure_recovery_routes)
             .configure(configure_replication_routes)
             .configure(configure_node_routes)
+            .configure(configure_sync_routes)
+            .configure(configure_logging_routes)
             // Static file serving
             .service(Files::new("/static", "./static").show_files_listing())
             // Route for `/tables` -> `tables.html`

@@ -12,7 +12,7 @@ use actix_web::error::ErrorInternalServerError;
 use actix_web::rt::Runtime;
 use awc::Client;
 use futures::future::join_all;
-use tracing::log::{error, info};
+use tracing::log::{error, info, trace};
 use crate::AppState;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 use crate::config::database_config::DatabaseConfig;
@@ -176,7 +176,7 @@ pub fn replicate_change_to_nodes(
     });
 }
 
-async fn replicate_to_single_node(
+pub async fn replicate_to_single_node(
     client: &Client,
     node: &ReplicationNode,
     request: &ReplicationRequest,
@@ -188,6 +188,9 @@ async fn replicate_to_single_node(
     } else {
         format!("http://{}/api/replication/push", target_addr)
     };
+    info!("Replication Node: {:#?}", node);
+    info!("Replicating to URL: {}", url);  // Add trace log for URL
+    trace!("Replication request: {:?}", request); // Add trace log for the request
 
     // Now use target_addr for awc requests
     let mut response = client
@@ -197,8 +200,10 @@ async fn replicate_to_single_node(
 
     if response.status().is_success() {
         let repl_response: ReplicationResponse = response.json().await?;
+        trace!("Replication response: {:?}", repl_response); // Add trace log for the response
         Ok(repl_response.status == "success")
     } else {
+        error!("HTTP error: {}", response.status()); // Add error log
         Err(format!("HTTP error: {}", response.status()).into())
     }
 }

@@ -218,16 +218,6 @@ async fn main() -> std::io::Result<()> {
         info!("Replication sync check scheduler is disabled (sync_interval = 0)");
     }
 
-    macro_rules! authenticated {
-    ($handler:expr) => {
-            |req: HttpRequest, app_state: web::Data<AppState>| async move {
-                authenticated_handler(req, app_state, $handler).await
-            }
-        };
-    }
-
-
-
 
     // Start the Actix Web HTTP server
     HttpServer::new(move || {

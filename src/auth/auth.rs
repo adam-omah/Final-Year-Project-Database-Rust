@@ -26,14 +26,14 @@ const USERS_TABLE: &str = "users";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct User {
-    pub id: String,
+    pub uuid: String,
     pub username: String,
     pub password_hash: String,
 }
 
 // Simulate fetching user from the database
 async fn fetch_user_from_db(username: &str, state: &web::Data<AppState>) -> Option<User> {
-    let query = format!("SELECT * FROM {}_initial WHERE username = '{}'", USERS_TABLE, username);
+    let query = format!("SELECT * FROM {} WHERE username = {}", USERS_TABLE, username);
 
     // Parse the query string into AST nodes
     match sql_parser(query.as_bytes()) {
@@ -43,20 +43,31 @@ async fn fetch_user_from_db(username: &str, state: &web::Data<AppState>) -> Opti
                 Ok(response) => {
                     match body::to_bytes(response.into_body()).await {
                         Ok(body_bytes) => {
-                            if let Ok(result) = serde_json::from_slice::<Vec<Vec<String>>>(&body_bytes) {
-                                if let Some(row) = result.get(0) {
-                                    if row.len() >= 3 { // UUID, username, password_hash
-                                        return Some(User {
-                                            id: row[0].clone(),
-                                            username: row[1].clone(),
-                                            password_hash: row[2].clone(),
-                                        });
+                            match serde_json::from_slice::<Vec<Vec<String>>>(&body_bytes) {
+                                Ok(result) => {
+                                    // Check if we have at least 2 rows (header + data)
+                                    if result.len() >= 2 {
+                                        let row = &result[1]; // Get the data row
+                                        if row.len() >= 3 { // UUID, username, password_hash
+                                            return Some(User {
+                                                uuid: row[0].clone(),
+                                                username: row[1].clone(),
+                                                password_hash: row[2].clone(),
+                                            });
+                                        } else {
+                                            eprintln!("Row doesn't have enough columns: expected at least 3, got {}", row.len());
+                                        }
+                                    } else {
+                                        // This handles the case where user was not found (only header row)
+                                        eprintln!("User not found: expected at least 2 rows, got {}", result.len());
                                     }
+                                    None
+                                },
+                                Err(e) => {
+                                    eprintln!("Failed to deserialize response body: {:?}", e);
+                                    None
                                 }
-                            } else {
-                                eprintln!("Failed to deserialize response body");
                             }
-                            None
                         }
                         Err(e) => {
                             eprintln!("Failed to convert body to bytes: {:?}", e);
@@ -77,56 +88,7 @@ async fn fetch_user_from_db(username: &str, state: &web::Data<AppState>) -> Opti
     }
 }
 
-// // Middleware Attempt
-// pub async fn basic_auth_middleware(
-//     mut req: ServiceRequest,
-//     next: Next<impl Service<ServiceRequest> + actix_web::body::MessageBody + 'static>
-// ) -> Result<ServiceResponse<BoxBody>, Error> {
-//     let state_data = req.app_data::<web::Data<AppState>>()
-//         .ok_or_else(|| ErrorInternalServerError("No app state"))?;
-//
-//     // Check for Authorization header
-//     if let Some(auth_header) = req.headers().get("Authorization") {
-//         let auth_str = auth_header.to_str().map_err(|_| ErrorUnauthorized("Invalid header"))?;
-//
-//         if auth_str.starts_with("Basic ") {
-//             let encoded_credentials = &auth_str[6..];
-//             let decoded_credentials = general_purpose::STANDARD
-//                 .decode(encoded_credentials)
-//                 .map_err(|_| ErrorUnauthorized("Invalid base64"))?;
-//
-//             let credentials_str = String::from_utf8(decoded_credentials)
-//                 .map_err(|_| ErrorUnauthorized("Invalid credentials"))?;
-//
-//             let parts: Vec<&str> = credentials_str.split(':').collect();
-//
-//             if parts.len() == 2 {
-//                 let (username, password) = (parts[0], parts[1]);
-//
-//                 // Fetch user and validate
-//                 if let Some(user) = fetch_user_from_db(username, state_data).await {
-//                     if user.password_hash == password {
-//                         // Authentication successful, insert user into request extensions
-//                         req.extensions_mut().insert(user);
-//                         // Explicitly specify the return type
-//                         return next.call(req).await.map(|res| res.map_into_boxed_body());
-//                     }
-//                 }
-//             }
-//         }
-//     }
-//     Err(ErrorUnauthorized("Authentication failed"))
-// }
-
-
-
-// Function to extract user from request (if available)
-pub fn get_user_from_request(req: &HttpRequest) -> Option<User> {
-    req.extensions().get::<User>().cloned()
-}
-
 //**  Authentication Routes **//
-
 // Handler for the /login endpoint
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -137,20 +99,32 @@ pub struct LoginRequest {
 async fn login(req: web::Json<LoginRequest>, state: web::Data<AppState>) -> Result<HttpResponse, Error> {
     let login_request = req.into_inner();
 
+    debug!("Login attempt for user: {}", login_request.username);
+
     // Fetch user from the database
+    debug!("Fetching user '{}' from database", login_request.username);
     let fetched_user = fetch_user_from_db(&login_request.username, &state).await;
 
-    match fetched_user {
+    match &fetched_user {
         Some(u) => {
-            // In real life, you'd hash the password and compare it with the stored hash
+            debug!("User '{}' found in database", login_request.username);
+
+            // Don't log the actual password hash for security reasons
             if u.password_hash == login_request.password {
-                // Authentication successful
+                info!("Authentication successful for user: {}", login_request.username);
+                debug!("Returning successful login response for user: {}", login_request.username);
                 Ok(HttpResponse::Ok().json(u)) // Return user info (or a session token)
             } else {
+                warn!("Failed login attempt for user: {} (password mismatch)", login_request.username);
+                debug!("Returning unauthorized response due to password mismatch");
                 Err(error::ErrorUnauthorized("Invalid credentials"))
             }
         }
-        None => Err(error::ErrorUnauthorized("Invalid credentials")),
+        None => {
+            warn!("Failed login attempt for non-existent user: {}", login_request.username);
+            debug!("Returning unauthorized response due to user not found");
+            Err(error::ErrorUnauthorized("Invalid credentials"))
+        }
     }
 }
 
@@ -171,14 +145,14 @@ async fn create_user(req: web::Json<CreateUserRequest>, state: web::Data<AppStat
 
     // Create a new user
     let new_user = User {
-        id: Uuid::new_v4().to_string(),
+        uuid: Uuid::new_v4().to_string(),
         username: create_request.username.clone(),
         password_hash: create_request.password.clone(), // Store a HASHED password in real life!
     };
 
     // Insert the new user into the database
     let table_name = USERS_TABLE;
-    let row_data = vec![new_user.id.clone(), new_user.username.clone(), new_user.password_hash.clone()];
+    let row_data = vec![new_user.uuid.clone().to_string(), new_user.username.clone(), new_user.password_hash.clone()];
 
     let result = crate::tables::table::insert_row(table_name, row_data, &state, None).await;
 
@@ -196,7 +170,7 @@ async fn create_user(req: web::Json<CreateUserRequest>, state: web::Data<AppStat
 // Handler for updating a user
 #[derive(Deserialize)]
 pub struct UpdateUserRequest {
-    pub id: String,
+    pub uuid: String,
     pub username: String,
     pub password: String,
 }
@@ -213,7 +187,7 @@ async fn update_user(req: web::Json<UpdateUserRequest>, state: web::Data<AppStat
     updated_values.insert("username".to_string(), update_request.username.clone());
     updated_values.insert("password_hash".to_string(), update_request.password.clone());
 
-    let result = crate::tables::table::update_row(USERS_TABLE, &update_request.id, updated_values, &state).await;
+    let result = crate::tables::table::update_row(USERS_TABLE, &update_request.uuid, updated_values, &state).await;
 
     match result {
         Ok(_) => {
@@ -250,36 +224,45 @@ async fn delete_user(req: web::Json<DeleteUserRequest>, state: web::Data<AppStat
 
 pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
     info!("Creating default admin user");
-    let schema_locked = app_state.schema.lock().unwrap();
-    if !schema_locked.tables.contains_key(&format!("{}_initial", crate::USERS_TABLE)) {
-        drop(schema_locked); // Release the lock before creating the table
 
-        // Define user table schema
-        let user_table = schema::schema::Table {
-            name: USERS_TABLE.to_string(),
-            columns: vec![
-                Column {
-                    name: "username".to_string(),
-                    data_type: DataType::String,
-                    rules: vec![],
-                },
-                Column {
-                    name: "password_hash".to_string(),
-                    data_type: DataType::String,
-                    rules: vec![],
-                }
-            ],
-        };
+    // Use a block scope to limit the lifetime of schema_locked
+    {
+        let schema_locked = app_state.schema.lock().unwrap();
+        if !schema_locked.tables.contains_key(&format!("{}_initial", crate::USERS_TABLE)) {
+            // Release the lock automatically at the end of this block
+            drop(schema_locked);
 
-        // Create the users table
-        create_table(&user_table, &Data::new(app_state.clone()))?;
-        info!("Created users table");
+            // Define user table schema
+            let user_table = Table {
+                name: USERS_TABLE.to_string(),
+                columns: vec![
+                    Column {
+                        name: "username".to_string(),
+                        data_type: DataType::String,
+                        rules: vec![],
+                    },
+                    Column {
+                        name: "password_hash".to_string(),
+                        data_type: DataType::String,
+                        rules: vec![],
+                    }
+                ],
+            };
+
+            // Create the users table
+            create_table(&user_table, &Data::new(app_state.clone()))?;
+            info!("Created users table");
+        } else {
+            // If table exists, still release the lock before proceeding
+            drop(schema_locked);
+        }
     }
 
     info!("Checking for admin user");
-    let query = format!("SELECT * FROM {} WHERE username = \"admin\"", crate::USERS_TABLE);
+    let query = format!("SELECT * FROM {} WHERE username = \"admin\"", USERS_TABLE);
     match sql_parser(query.as_bytes()) {
         Ok(ast_nodes) => {
+            debug!("Query: {}", query);
             // Use global_execute_query instead of execute_query
             match global_execute_query(ast_nodes).await {
                 Ok(response) => {
@@ -394,7 +377,7 @@ impl FromRequest for User {
 }
 
 // Authentication wrapper function
-pub async fn authenticate_request(req: &HttpRequest, state: &web::Data<AppState>) -> Result<(), actix_web::Error> {
+pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> Result<(), Error> {
     // Log request details
     debug!("Incoming request method: {}", req.method());
     debug!("Request URI: {}", req.uri());
@@ -420,6 +403,7 @@ pub async fn authenticate_request(req: &HttpRequest, state: &web::Data<AppState>
 
                     // Attempt base64 decoding
                     let encoded_credentials = &auth_str[6..];
+                    debug!("Encoded credentials: {}", encoded_credentials);
                     match general_purpose::STANDARD.decode(encoded_credentials) {
                         Ok(decoded_credentials) => {
                             // Convert to UTF-8 string
@@ -436,15 +420,29 @@ pub async fn authenticate_request(req: &HttpRequest, state: &web::Data<AppState>
                                     }
 
                                     let (username, password) = (parts[0], parts[1]);
-                                    debug!("Attempting to authenticate user: {}", username);
+                                    debug!("Attempting to authenticate user: {} with password: {}", username, password);
 
                                     // Fetch user from database
                                     match fetch_user_from_db(username, state).await {
                                         Some(user) => {
-                                            debug!("User found in database");
+                                            debug!("User found in database with stored password_hash: {}", user.password_hash);
 
-                                            // Password check
-                                            if user.password_hash == password {
+                                            // Password check with detailed logging
+                                            debug!("Comparing provided password: '{}' with stored hash: '{}'", password, user.password_hash);
+
+                                            // Check password equality with length info
+                                            let password_matches = user.password_hash == password;
+                                            debug!("Password match result: {}", password_matches);
+                                            debug!("Password lengths - provided: {} chars, stored: {} chars",
+                                                   password.len(), user.password_hash.len());
+
+                                            // Check for whitespace or special characters
+                                            let has_whitespace_provided = password.contains(char::is_whitespace);
+                                            let has_whitespace_stored = user.password_hash.contains(char::is_whitespace);
+                                            debug!("Whitespace check - provided password: {}, stored hash: {}",
+                                                   has_whitespace_provided, has_whitespace_stored);
+
+                                            if password_matches {
                                                 info!("Authentication successful for user: {}", username);
 
                                                 // Insert user into request extensions
@@ -452,6 +450,21 @@ pub async fn authenticate_request(req: &HttpRequest, state: &web::Data<AppState>
                                                 return Ok(());
                                             } else {
                                                 warn!("Password mismatch for user: {}", username);
+                                                debug!("Byte-by-byte comparison:");
+
+                                                let min_len = password.len().min(user.password_hash.len());
+                                                for i in 0..min_len {
+                                                    let p_char = &password[i..=i];
+                                                    let h_char = &user.password_hash[i..=i];
+                                                    debug!("Position {}: '{}' vs '{}', match: {}",
+                                                           i, p_char, h_char, p_char == h_char);
+                                                }
+
+                                                if password.len() != user.password_hash.len() {
+                                                    debug!("Length mismatch: Password has {} extra chars, hash has {} extra chars",
+                                                           password.len().saturating_sub(user.password_hash.len()),
+                                                           user.password_hash.len().saturating_sub(password.len()));
+                                                }
                                             }
                                         },
                                         None => {
@@ -459,8 +472,8 @@ pub async fn authenticate_request(req: &HttpRequest, state: &web::Data<AppState>
                                         }
                                     }
                                 },
-                                Err(_) => {
-                                    error!("Failed to convert decoded credentials to UTF-8");
+                                Err(e) => {
+                                    error!("Failed to convert decoded credentials to UTF-8: {:?}", e);
                                 }
                             }
                         },
@@ -469,8 +482,8 @@ pub async fn authenticate_request(req: &HttpRequest, state: &web::Data<AppState>
                         }
                     }
                 },
-                Err(_) => {
-                    error!("Failed to convert Authorization header to string");
+                Err(e) => {
+                    error!("Failed to convert Authorization header to string: {:?}", e);
                 }
             }
         },
@@ -479,8 +492,9 @@ pub async fn authenticate_request(req: &HttpRequest, state: &web::Data<AppState>
         }
     }
 
-    // If we've reached this point, authentication has failed
-    Err(ErrorUnauthorized("Authentication failed"))
+    // If we reach here, authentication failed
+    warn!("Authentication failed - returning Unauthorized");
+    Err(ErrorUnauthorized("Invalid credentials"))
 }
 
 

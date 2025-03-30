@@ -433,7 +433,7 @@ pub fn is_valid_data_type(data_type: &DataType, value: &str) -> bool {
 }
 
 pub fn get_column_names_from_schema(
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
     table_name: &String,
 ) -> Result<Vec<String>> {
     let schema = state.schema.lock().unwrap();

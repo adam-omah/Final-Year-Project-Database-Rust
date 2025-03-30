@@ -6,7 +6,7 @@ use crate::schema::schema;
 use crate::schema::schema::{drop_table, get_column_names_from_schema};
 use crate::{AppState};
 use actix_web::{post, web, HttpRequest, HttpResponse};
-use tracing::log::{debug, info};
+use tracing::log::{debug, error, info};
 use uuid::Uuid;
 use regex::Regex;
 use serde_json::json;
@@ -22,6 +22,7 @@ pub async fn execute_query(
     // Iterate through AST nodes to extract the WHERE clause (if any)
     for ast_node in ast_nodes.iter() {
         if let ASTNode::Where { condition } = ast_node {
+            info!("Found WHERE clause: {:?}", condition);
             where_clause = Some(condition.clone());
             break; // Extract only the first WHERE clause
         }
@@ -62,52 +63,87 @@ async fn handle_select(
     data: &web::Data<AppState>,
     where_clause: Option<Expression>,
 ) -> HttpResponse {
+    info!("Handling SELECT query");
+    debug!("SELECT details: columns={:?}, table={:?}, timestamp={:?}", columns, table, timestamp);
+
     if let Identifier::Name(table_name) = table {
+        debug!("Fetching data for table: {}", table_name);
+
         // Retrieve table data
         let table_data_result = if let Some(timestamp) = timestamp {
+            debug!("Getting table at timestamp: {}", timestamp);
             get_table_at_timestamp(data.clone(), table_name, timestamp.clone()).await
         } else {
+            debug!("Getting current table data for: {}", table_name);
             get_table_data(data.clone(), table_name).await
         };
 
         // Handle table data retrieval
         match table_data_result {
             Ok(mut table_data) => {
+                debug!("Table data retrieved: {} rows", table_data.len());
+                if !table_data.is_empty() {
+                    debug!("First row sample: {:?}", table_data.first());
+                }
+
                 // If a WHERE clause exists, filter the rows based on it
                 if let Some(condition) = &where_clause {
+                    info!("Evaluating WHERE clause: {:?}", condition);
                     let column_names = match get_column_names_from_schema(&data, table_name) {
-                        Ok(names) => names,
-                        Err(_) => { return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Error fetching column names"})) }
+                        Ok(names) => {
+                            debug!("Column names from schema: {:?}", names);
+                            names
+                        },
+                        Err(e) => {
+                            error!("Error fetching column names: {}", e);
+                            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error fetching column names: {}", e)}));
+                        }
                     };
+
+                    let original_count = table_data.len();
                     table_data = table_data
                         .into_iter()
                         .filter(|row| row == &column_names ||
                             evaluate_where_clause(condition, row, &column_names)
                         )
                         .collect();
+                    debug!("After WHERE filtering: {} rows (from {})", table_data.len(), original_count);
+                    debug!("WHERE clause result: {:?}", table_data);
                 }
 
                 // Process the SELECT query
+                debug!("Processing SELECT with {} rows", table_data.len());
                 let result = process_select(columns, &table_data, data.clone(), table_name).await;
+                debug!("SELECT result: {} rows", result.len());
 
                 if result.len() <= 1 {
+                    debug!("No matching rows found in result");
                     HttpResponse::Ok().json(serde_json::json!({ "message": "No matching rows found" }))
                 } else {
                     match serde_json::to_string(&result) {
-                        Ok(json) => HttpResponse::Ok().json(serde_json::from_str::<serde_json::Value>(&json).unwrap()),
-                        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Serialization error: {}", e)}))
+                        Ok(json) => {
+                            debug!("Successfully serialized result");
+                            HttpResponse::Ok().json(serde_json::from_str::<serde_json::Value>(&json).unwrap())
+                        },
+                        Err(e) => {
+                            error!("Serialization error: {}", e);
+                            HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Serialization error: {}", e)}))
+                        }
                     }
                 }
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    HttpResponse::NotFound().json(serde_json::json!({"error": "Table data not found"}))
+                    error!("Table not found: {}", table_name);
+                    HttpResponse::NotFound().json(serde_json::json!({"error": format!("Table '{}' not found", table_name)}))
                 } else {
+                    error!("Error retrieving table data: {}", e);
                     HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error retrieving table data: {}", e)}))
                 }
             }
         }
     } else {
+        error!("Invalid table name in SELECT query");
         HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid table name" }))
     }
 }
@@ -552,6 +588,7 @@ pub async fn global_execute_query(ast_nodes: Vec<ASTNode>) -> anyhow::Result<Htt
         ast_nodes,
         web::Data::from(global_state)
     ).await;
+    info!("Global query execution result: {:?}", response);
 
     // Log the result
     match response.status() {

@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use actix_web::web::Data;
-use tracing::log::{debug, info};
+use tracing::log::{debug, error, info};
 use crate::schema::schema::{check_column_rules, is_valid_data_type, DataType};
 use chrono::{Local, NaiveDateTime, Utc};
 use uuid::Uuid;
@@ -367,39 +367,96 @@ pub fn get_table_data(
     table_name: &str,
 ) -> BoxFuture<Result<Vec<Vec<String>>>> {
     Box::pin(async move {
+        debug!("Starting get_table_data for table: {}", table_name);
+
         // Retrieve column names
-        let column_names = get_column_names(table_name, &state).await?;
+        debug!("Retrieving column names for table: {}", table_name);
+        let column_names = match get_column_names(table_name, &state).await {
+            Ok(names) => {
+                debug!("Retrieved column names: {:?}", names);
+                names
+            },
+            Err(e) => {
+                error!("Failed to retrieve column names for table {}: {}", table_name, e);
+                return Err(e);
+            }
+        };
 
         // Attempt to get from cache (using a shorter lock scope)
+        debug!("Attempting to retrieve data from cache for table: {}", table_name);
         {
-            let cache = state.cache.lock().unwrap();
+            let cache_result = state.cache.lock();
+            if let Err(e) = &cache_result {
+                error!("Failed to acquire cache lock: {}", e);
+                return Err(Error::new(ErrorKind::Other, format!("Failed to acquire cache lock: {}", e)));
+            }
+
+            let cache = cache_result.unwrap();
             if let Some(cached_data) = cache.get(table_name) {
+                debug!("Data found in cache for table {}. Rows: {}", table_name, cached_data.len());
                 // If data is found in cache, prepend column names
                 let mut result = cached_data.clone();
                 result.insert(0, column_names);
                 return Ok(result);
+            } else {
+                debug!("No data found in cache for table: {}", table_name);
             }
         }
 
+        // If we're here, we need to load the data from file
         let initial_table_name = format!("{}_initial", table_name);
         let initial_table_path = Path::new(&state.config.db_dir)
             .join(&state.config.table_dir)
             .join(&initial_table_name);
 
-        let initial_data = load_table_data_from_file(&initial_table_path)?;
-        recalculate_table(&state, table_name, initial_data.clone()).await?;  // Pass initial_data
+        debug!("Loading initial data from path: {:?}", initial_table_path);
+
+        let initial_data = match load_table_data_from_file(&initial_table_path) {
+            Ok(data) => {
+                debug!("Successfully loaded initial data. Rows: {}", data.len());
+                data
+            },
+            Err(e) => {
+                error!("Failed to load data from file {:?}: {}", initial_table_path, e);
+                return Err(e);
+            }
+        };
+
+        debug!("Recalculating table {} with {} rows of initial data", table_name, initial_data.len());
+        match recalculate_table(&state, table_name, initial_data.clone()).await {
+            Ok(_) => debug!("Table recalculation successful for {}", table_name),
+            Err(e) => {
+                error!("Failed to recalculate table {}: {}", table_name, e);
+                return Err(e);
+            }
+        }
 
         // Now, the cache *should* have the updated data
-        let cache = state.cache.lock().unwrap();
-        let cached_data = cache
-            .get(table_name)
-            .cloned()
-            .ok_or_else(|| Error::new(ErrorKind::Other, "Data not found in cache after recalculation"))?;
+        debug!("Retrieving recalculated data from cache for table: {}", table_name);
+        let cache_result = state.cache.lock();
+        if let Err(e) = &cache_result {
+            error!("Failed to acquire cache lock after recalculation: {}", e);
+            return Err(Error::new(ErrorKind::Other, format!("Failed to acquire cache lock: {}", e)));
+        }
+
+        let cache = cache_result.unwrap();
+        let cached_data = match cache.get(table_name) {
+            Some(data) => {
+                debug!("Found recalculated data in cache. Rows: {}", data.len());
+                data.clone()
+            },
+            None => {
+                error!("Data not found in cache after recalculation for table: {}", table_name);
+                return Err(Error::new(ErrorKind::Other, format!("Data not found in cache after recalculation for table: {}", table_name)));
+            }
+        };
 
         // Prepend column names to the cached data
-        let mut result = cached_data.clone();
+        let mut result = cached_data;
+        debug!("Prepending column names to result. Final row count: {}", result.len() + 1);
         result.insert(0, column_names);
 
+        debug!("Successfully completed get_table_data for table: {}", table_name);
         Ok(result)
     })
 }
@@ -971,22 +1028,45 @@ pub async fn get_column_names(
     table_name: &str,
     state: &web::Data<AppState>,
 ) -> Result<Vec<String>> {
+    debug!("get_column_names called for table: {}", table_name);
+
     // Acquire a lock on the schema to read table definitions
-    let schema = state.schema.lock().unwrap();
+    debug!("Attempting to acquire schema lock");
+    let schema_result = state.schema.lock();
+    if let Err(e) = &schema_result {
+        error!("Failed to acquire schema lock: {}", e);
+        return Err(std::io::Error::new(
+            ErrorKind::Other,
+            format!("Failed to acquire schema lock: {}", e)
+        ));
+    }
+    let schema = schema_result.unwrap();
+    debug!("Schema lock acquired successfully");
 
     // Construct the initial table name used in the schema
     let initial_table_name = format!("{}_initial", table_name);
+    debug!("Looking for table definition with name: {}", initial_table_name);
 
     // Look up the table in the schema
-    let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
-        std::io::Error::new(
-            ErrorKind::NotFound,
-            format!("Table '{}' does not exist in the schema", initial_table_name),
-        )
-    })?;
+    let table = match schema.tables.get(&initial_table_name) {
+        Some(t) => {
+            debug!("Table '{}' found in schema", initial_table_name);
+            t
+        },
+        None => {
+            error!("Table '{}' does not exist in schema", initial_table_name);
+            debug!("Available tables in schema: {:?}", schema.tables.keys().collect::<Vec<_>>());
+            return Err(std::io::Error::new(
+                ErrorKind::NotFound,
+                format!("Table '{}' does not exist in the schema", initial_table_name),
+            ));
+        }
+    };
 
     // Extract the column names from the `columns` field of the table
+    debug!("Extracting column names from table definition");
     let column_names: Vec<String> = table.columns.iter().map(|col| col.name.clone()).collect();
+    debug!("Found {} columns: {:?}", column_names.len(), column_names);
 
     Ok(column_names)
 }

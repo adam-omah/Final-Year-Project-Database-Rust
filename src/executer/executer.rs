@@ -15,7 +15,6 @@ use crate::tables::table::extract_literal_value;
 pub async fn execute_query(
     ast_nodes: Vec<ASTNode>,
     data: web::Data<AppState>,
-    _req: HttpRequest,
 ) -> HttpResponse {
     info!("Executing query with {} AST nodes", ast_nodes.len());
     let mut where_clause: Option<Expression> = None;
@@ -543,6 +542,31 @@ fn find_column_index(column_names: &[String], col_name: &str) -> Option<usize> {
     position
 }
 
+pub async fn global_execute_query(ast_nodes: Vec<ASTNode>) -> anyhow::Result<HttpResponse> {
+    // Attempt to retrieve the global app state
+    let global_state = AppState::global_state()
+        .ok_or_else(|| anyhow::anyhow!("Global app state not initialized"))?;
+
+    // Execute the query using the global state
+    let response = execute_query(
+        ast_nodes,
+        web::Data::from(global_state)
+    ).await;
+
+    // Log the result
+    match response.status() {
+        actix_web::http::StatusCode::OK => {
+            tracing::info!("Global query execution successful");
+            Ok(response)
+        },
+        _ => {
+            tracing::warn!("Global query execution failed with status: {}", response.status());
+            Err(anyhow::anyhow!("Query execution failed"))
+        }
+    }
+}
+
+
 
 #[post("/query")]
 async fn execute_query_endpoint(
@@ -556,7 +580,7 @@ async fn execute_query_endpoint(
     match sql_parser(query_bytes) {
         Ok(ast_nodes) => {
             // Successfully parsed query
-            execute_query(ast_nodes, data, http_request).await
+            execute_query(ast_nodes, data).await
         }
         Err(err) => {
             // Handle parse failure with a unified JSON error response

@@ -1,6 +1,7 @@
 use actix_web::{ web, App, HttpRequest, HttpServer, Responder};
 use std::collections::{BTreeMap};
 use std::env;
+use std::fmt::Debug;
 use actix_files::Files;
 use std::io::{Result};
 use std::string::String;
@@ -12,14 +13,17 @@ use chrono::Duration;
 use tracing::log::{error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use uuid::Uuid;
 use crate::executer::executer::execute_query_endpoint;
 use crate::config::database_config::DatabaseConfig;
-use crate::tables::table::{get_column_names_api, get_table_api, get_table_at_timestamp_api, list_tables_api};
+use crate::tables::table::{create_table, get_column_names_api, get_table_api, get_table_at_timestamp_api, list_tables_api};
 use schema::{
     schema::load_schema,
     schema::Schema,
 };
+use crate::auth::auth::{ configure_auth_routes, create_default_user};
 use crate::change_logging::change_logging::{configure_logging_routes, ChangeLogger};
+use crate::query::parser::sql_parser;
 use crate::recovery::recovery::{configure_recovery_routes, trigger_log_recovery, trigger_specific_table_recovery, LogRecoveryManager};
 use crate::replication::active_replication::configure_replication_routes;
 use crate::replication::passive_replication::{
@@ -28,6 +32,7 @@ use crate::replication::passive_replication::{
 };
 use crate::replication::replication_nodes::configure_node_routes;
 use crate::replication::replication_sync_checker::{configure_sync_routes, perform_replication_sync, trigger_replication_sync};
+use crate::schema::schema::{Column, DataType};
 
 // Module Imports.
 pub mod config;
@@ -38,11 +43,14 @@ pub mod executer;
 pub mod change_logging;
 pub mod recovery;
 pub mod replication;
+mod auth;
 
 // public constants
 pub const DB_DIR: &str = "my_rust_db";
 pub const SCHEMA_FILE: &str = "schema.json";
 pub const TABLE_DIR: &str = "tables";
+pub const USERS_TABLE: &str = "users";
+
 
 #[derive(Clone)]
 pub struct AppState {
@@ -120,6 +128,7 @@ fn init_database(config: &DatabaseConfig) -> Result<()> {
     Ok(())
 }
 
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Initialize tracing for logging
@@ -167,6 +176,10 @@ async fn main() -> std::io::Result<()> {
     } else {
         panic!("Failed to initialize global application state");
     }
+    // Create default admin user if not exists
+    if let Err(e) = create_default_user(&app_state).await {
+        error!("Failed to create default admin user: {}", e);
+    }
 
     let sync_interval = app_state.config.replication.sync_interval;
 
@@ -185,7 +198,7 @@ async fn main() -> std::io::Result<()> {
 
                 if elapsed >= interval_duration {
                     last_tick = now;
-                    info!("Running scheduled replication sync check at: {}", now.format("%Y-%m-%d %H:%M:%S"));
+                    info!("Running scheduled replication sync check at: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
 
                     // Retrieve the global app state
                     if let Some(global_state) = AppState::global_state() {
@@ -205,6 +218,15 @@ async fn main() -> std::io::Result<()> {
         info!("Replication sync check scheduler is disabled (sync_interval = 0)");
     }
 
+    macro_rules! authenticated {
+    ($handler:expr) => {
+            |req: HttpRequest, app_state: web::Data<AppState>| async move {
+                authenticated_handler(req, app_state, $handler).await
+            }
+        };
+    }
+
+
 
 
     // Start the Actix Web HTTP server
@@ -212,16 +234,18 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(app_state.clone()))
             // API endpoints
-            .service(get_table_api)               // Updated API for fetching table data
-            .service(get_table_at_timestamp_api)  // Updated API for fetching table data at a specific timestamp
-            .service(list_tables_api)             // Updated API for listing all tables
-            .service(execute_query_endpoint)
+            .service(get_table_api)
+            .service(get_table_at_timestamp_api)
+            .service(list_tables_api)
             .service(get_column_names_api)
+            .service(execute_query_endpoint)
+            // Configurations
             .configure(configure_recovery_routes)
             .configure(configure_replication_routes)
             .configure(configure_node_routes)
             .configure(configure_sync_routes)
             .configure(configure_logging_routes)
+            .configure(configure_auth_routes)
             // Static file serving
             .service(Files::new("/static", "./static").show_files_listing())
             // Route for `/tables` -> `tables.html`
@@ -240,13 +264,14 @@ async fn main() -> std::io::Result<()> {
             .route("/", web::get().to(|| async {
                 actix_files::NamedFile::open("./static/html/index.html").unwrap()
             }))
-})
+    })
         .bind((hostname.as_str(), port))? // Bind to all network interfaces on port 8080
         .run()
         .await?;
 
     Ok(())
 }
+
 
 
 

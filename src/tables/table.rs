@@ -1,7 +1,7 @@
 // Table.rs
 use crate::schema::{schema::create_table as schema_create_table, schema::Table};
 use crate::AppState;
-use actix_web::{get, web, HttpResponse, Responder};
+use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
 use std::fs::{OpenOptions};
 use std::io::{Error, ErrorKind, Read, Result, Seek, Write};
 use std::path::Path;
@@ -9,14 +9,16 @@ use crate::query::parser::Identifier;
 use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use actix_web::web::Data;
 use tracing::log::{debug, info};
 use crate::schema::schema::{check_column_rules, is_valid_data_type, DataType};
 use chrono::{Local, NaiveDateTime, Utc};
 use uuid::Uuid;
+use crate::auth::auth::authenticate_request;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 use crate::replication::active_replication::replicate_change_to_nodes;
 
-pub fn create_table(table: &Table, state: &web::Data<AppState>) -> Result<()> {
+pub fn create_table(table: &Table, state: &Data<AppState>) -> Result<()> {
     let mut schema = state.schema.lock().unwrap();
     schema_create_table(&mut schema, table.clone(), &state.config, &state.change_logger, &state)?;
     drop(schema);
@@ -992,132 +994,163 @@ pub async fn get_column_names(
 
 
 #[get("/api/tables/{table_name}")]
-async fn get_table_api(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
-    let table_name = path.into_inner();
+async fn get_table_api(
+    req: HttpRequest,
+    path: web::Path<String>,
+    data: web::Data<AppState>) -> impl Responder {
 
-    match get_table_data(data.clone(), &table_name).await {
-        Ok(table_data) => {
-            if table_data.is_empty() {
-                return HttpResponse::NotFound().json(serde_json::json!({"error": "Table not found or table data is empty"})); // Return structured JSON for 404
-            }
+    // Authenticate first
+    match authenticate_request(&req, &data).await {
+        Ok(_) => {
+            let table_name = path.into_inner();
+            match get_table_data(data.clone(), &table_name).await {
+                Ok(table_data) => {
+                    if table_data.is_empty() {
+                        return HttpResponse::NotFound().json(serde_json::json!({"error": "Table not found or table data is empty"})); // Return structured JSON for 404
+                    }
 
-            // Format table data for JSON
-            let formatted_data: Vec<Vec<serde_json::Value>> = table_data
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|value| {
-                            if let Ok(num) = value.parse::<serde_json::Number>() {
-                                serde_json::Value::Number(num)
-                            } else {
-                                serde_json::Value::String(value.trim_matches('"').to_string())
-                            }
+                    // Format table data for JSON
+                    let formatted_data: Vec<Vec<serde_json::Value>> = table_data
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|value| {
+                                    if let Ok(num) = value.parse::<serde_json::Number>() {
+                                        serde_json::Value::Number(num)
+                                    } else {
+                                        serde_json::Value::String(value.trim_matches('"').to_string())
+                                    }
+                                })
+                                .collect()
                         })
-                        .collect()
-                })
-                .collect();
+                        .collect();
 
-            match serde_json::to_value(&formatted_data) {
-                Ok(json_value) => HttpResponse::Ok().json(json_value),
-                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Serialization error: {}", e)})),
+                    match serde_json::to_value(&formatted_data) {
+                        Ok(json_value) => HttpResponse::Ok().json(json_value),
+                        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Serialization error: {}", e)})),
+                    }
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        HttpResponse::NotFound().json(serde_json::json!({"error": "Table data file not found"}))
+                    } else {
+                        HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error retrieving table data: {}", e)}))
+                    }
+                }
             }
         }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                HttpResponse::NotFound().json(serde_json::json!({"error": "Table data file not found"}))
-            } else {
-                HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error retrieving table data: {}", e)}))
-            }
-        }
+        Err(auth_error) => auth_error.into()
     }
 }
 
 
-#[get("/api/tables/{table_name}/at/{timestamp}")]
+    #[get("/api/tables/{table_name}/at/{timestamp}")]
 async fn get_table_at_timestamp_api(
+    req: HttpRequest,
     path: web::Path<(String, String)>,
-    data: web::Data<AppState>,
+    data: Data<AppState>,
 ) -> impl Responder {
-    let (table_name, timestamp) = path.into_inner(); // Extract table name and timestamp from the path
-    match get_table_at_timestamp(data, &table_name, timestamp).await {
-        Ok(filtered_data) => {
-            // Serialize each value based on its type (number or string)
-            let formatted_data: Vec<Vec<serde_json::Value>> = filtered_data
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|value| {
-                            if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
-                                serde_json::Value::Number(
-                                    value
-                                        .parse::<serde_json::Number>()
-                                        .expect("Invalid number format"),
-                                )
-                            } else {
-                                serde_json::Value::String(value.trim_matches('"').to_string())
-                            }
+    // Authenticate first
+    match authenticate_request(&req, &data).await {
+        Ok(_) => {
+            let (table_name, timestamp) = path.into_inner(); // Extract table name and timestamp from the path
+            match get_table_at_timestamp(data, &table_name, timestamp).await {
+                Ok(filtered_data) => {
+                    // Serialize each value based on its type (number or string)
+                    let formatted_data: Vec<Vec<serde_json::Value>> = filtered_data
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|value| {
+                                    if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
+                                        serde_json::Value::Number(
+                                            value
+                                                .parse::<serde_json::Number>()
+                                                .expect("Invalid number format"),
+                                        )
+                                    } else {
+                                        serde_json::Value::String(value.trim_matches('"').to_string())
+                                    }
+                                })
+                                .collect()
                         })
-                        .collect()
-                })
-                .collect();
+                        .collect();
 
-            // Convert the formatted table data to JSON and send it in the response
-            match serde_json::to_value(&formatted_data) {
-                Ok(json_value) => HttpResponse::Ok().json(json_value),
-                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Serialization error: {}", e)})),
+                    // Convert the formatted table data to JSON and send it in the response
+                    match serde_json::to_value(&formatted_data) {
+                        Ok(json_value) => HttpResponse::Ok().json(json_value),
+                        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Serialization error: {}", e)})),
+                    }
+                }
+                Err(e) => {
+                    if e.kind() == ErrorKind::NotFound {
+                        HttpResponse::NotFound().json(serde_json::json!({"error": "Table data file not found"}))
+                    } else {
+                        HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error retrieving table data: {}", e)}))
+                    }
+                }
             }
         }
-        Err(e) => {
-            if e.kind() == ErrorKind::NotFound {
-                HttpResponse::NotFound().json(serde_json::json!({"error": "Table data file not found"}))
-            } else {
-                HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error retrieving table data: {}", e)}))
-            }
-        }
+        Err(auth_error) => auth_error.into()
     }
 }
 
 #[get("/api/tables")]
-async fn list_tables_api(state: web::Data<AppState>) -> impl Responder {
-    // Acquire a read lock to access the schema
-    let schema = state.schema.lock().unwrap();
+async fn list_tables_api(req: HttpRequest,state: Data<AppState>) -> impl Responder {
+    // Authenticate first
+    match authenticate_request(&req, &state).await {
+        Ok(_) => {
+            // Acquire a read lock to access the schema
+            let schema = state.schema.lock().unwrap();
 
-    // Create a `HashSet` to store unique base table names by removing `_initial` and `_updates` suffixes
-    let mut base_table_names = HashSet::new();
+            // Create a `HashSet` to store unique base table names by removing `_initial` and `_updates` suffixes
+            let mut base_table_names = HashSet::new();
 
-    for table_name in schema.tables.keys() {
-        if let Some(base_name) = table_name.strip_suffix("_initial") {
-            base_table_names.insert(base_name.to_string());
-        } else if let Some(base_name) = table_name.strip_suffix("_updates") {
-            base_table_names.insert(base_name.to_string());
-        } else {
-            // If the table doesn't have any special suffixes, add it as-is
-            base_table_names.insert(table_name.clone());
+            for table_name in schema.tables.keys() {
+                if let Some(base_name) = table_name.strip_suffix("_initial") {
+                    base_table_names.insert(base_name.to_string());
+                } else if let Some(base_name) = table_name.strip_suffix("_updates") {
+                    base_table_names.insert(base_name.to_string());
+                } else {
+                    // If the table doesn't have any special suffixes, add it as-is
+                    base_table_names.insert(table_name.clone());
+                }
+            }
+
+            // Convert the `HashSet` to a sorted `Vec` for consistent output
+            let mut table_list: Vec<String> = base_table_names.into_iter().collect();
+            table_list.sort();
+
+            // Return JSON containing the list of base table names
+            HttpResponse::Ok().json(table_list)
         }
+        Err(auth_error) => auth_error.into()
     }
-
-    // Convert the `HashSet` to a sorted `Vec` for consistent output
-    let mut table_list: Vec<String> = base_table_names.into_iter().collect();
-    table_list.sort();
-
-    // Return JSON containing the list of base table names
-    HttpResponse::Ok().json(table_list)
 }
 
 #[get("/api/tables/{table_name}/columns")]
-async fn get_column_names_api(path: web::Path<String>, data: web::Data<AppState>) -> impl Responder {
-    let table_name = path.into_inner();
+async fn get_column_names_api(
+    req: HttpRequest,
+    path: web::Path<String>,
+    data: Data<AppState>) -> impl Responder {
+    // Authenticate first
+    match authenticate_request(&req, &data).await {
+        Ok(_) => {
+            let table_name = path.into_inner();
 
-    // Call the `get_column_names` function
-    match get_column_names(&table_name, &data).await {
-        Ok(column_names) => HttpResponse::Ok().json(column_names),
-        Err(e) => {
-            if e.kind() == ErrorKind::NotFound {
-                HttpResponse::NotFound().json(serde_json::json!({"error": e.to_string()}))
-            } else {
-                HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+            // Call the `get_column_names` function
+            match get_column_names(&table_name, &data).await {
+                Ok(column_names) => HttpResponse::Ok().json(column_names),
+                Err(e) => {
+                    if e.kind() == ErrorKind::NotFound {
+                        HttpResponse::NotFound().json(serde_json::json!({"error": e.to_string()}))
+                    } else {
+                        HttpResponse::InternalServerError().json(serde_json::json!({"error": e.to_string()}))
+                    }
+                }
             }
         }
+        Err(auth_error) => auth_error.into()
     }
 }
 

@@ -4,14 +4,16 @@ use std::time::Duration;
 use std::error::Error;
 use std::fmt;
 
-use actix_web::{web, HttpResponse, HttpRequest, http, post, get, Error as ActixError};
+use actix_web::{web, HttpResponse, HttpRequest, http, post, get, Error as ActixError, rt};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use chrono::Utc;
 use futures::TryFutureExt;
+use tokio::time::timeout;
+use tracing::log::{debug, error, info};
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
-use crate::replication::active_replication::{ ReplicationRequest, ReplicationResponse};
+use crate::replication::active_replication::{replicate_to_single_node, ReplicationRequest, ReplicationResponse};
 use crate::replication::replication_nodes::{load_nodes, ReplicationNode};
 
 // Custom error type for replication
@@ -68,7 +70,7 @@ pub struct QueuedReplicationRequest {
 
 
 // Passive Replication Queue Manager
-#[derive(Default)]
+#[derive(Default,Clone)]
 pub struct PassiveReplicationQueue {
     pub queue: Vec<QueuedReplicationRequest>,
 }
@@ -141,7 +143,7 @@ impl PassiveReplicationQueue {
 
 // Passive Replication Service
 pub struct PassiveReplicationService {
-    is_running: bool,
+    pub(crate) is_running: bool,
 }
 
 impl PassiveReplicationService {
@@ -149,102 +151,197 @@ impl PassiveReplicationService {
         Self { is_running: false }
     }
 
-    // Start the passive replication service
     pub fn start(
         &mut self,
         app_state: Arc<Mutex<AppState>>,
-        config: DatabaseConfig
+        config: DatabaseConfig,
     ) {
-        // Prevent multiple instances
+        debug!("Entering PassiveReplicationService::start");
+
         if self.is_running {
+            debug!("Passive replication service already running. Exiting.");
             return;
         }
+
         self.is_running = true;
+        debug!("Passive replication service set to running.");
 
-        // Clone the necessary data for the async task
-        let app_state_clone = Arc::clone(&app_state);
-        let config_clone = config.clone();
-
-        // Spawn the replication task using Actix runtime
+        // Use async move to transfer ownership
         actix_web::rt::spawn(async move {
-            loop {
-                actix_web::rt::time::sleep(Duration::from_secs(60)).await;
+            let app_state_clone = Arc::clone(&app_state);
+            let config_clone = config.clone();
 
-                let mut processed_requests = Vec::new();
-
-                {
-                    let mut app_state_guard = app_state_clone.lock().unwrap();
-                    let mut queue = app_state_guard.passive_replication_queue.lock().unwrap();
-
-                    for (index, queued_req) in queue.queue.iter_mut().enumerate() {
-                        // Check if enough time has passed since the last attempt based on config retry interval
-                        let should_retry = match (queued_req.last_attempt, queued_req.attempts) {
-                            (Some(last_attempt), attempts) if attempts > 0 => {
-                                let time_since_last_attempt = chrono::Utc::now() - last_attempt;
-                                time_since_last_attempt >= chrono::Duration::seconds(config_clone.replication.retry_interval) &&
-                                    attempts < config_clone.replication.max_replication_attempts
-                            },
-                            (None, _) => true, // First attempt
-                            _ => false
-                        };
-
-                        if should_retry {
-                            // Pass the replication attempt information
-                            match try_replicate_to_nodes(&config_clone, &queued_req.request).await {
-                                Ok(_) => {
-                                    processed_requests.push(index);
-                                }
-                                Err(ReplicationError::ReplicationFailure(failed_nodes_str)) => {
-                                    // Parse the failed nodes string and update the request
-                                    queued_req.failed_nodes = failed_nodes_str
-                                        .replace("Failed nodes: ", "")
-                                        .split(", ")
-                                        .map(|s| s.to_string())
-                                        .collect();
-
-                                    queued_req.attempts += 1;
-                                    queued_req.last_attempt = Some(chrono::Utc::now());
-
-                                    // Set first failed attempt if not already set
-                                    if queued_req.first_failed_attempt.is_none() {
-                                        queued_req.first_failed_attempt = Some(chrono::Utc::now());
-                                    }
-                                }
-                                Err(_) => {
-                                    // Other errors, increment attempts
-                                    queued_req.attempts += 1;
-                                    queued_req.last_attempt = Some(chrono::Utc::now());
-                                }
-                            }
-                        }
-                    }
-
-                    // Remove successfully processed requests
-                    for &index in processed_requests.iter().rev() {
-                        queue.queue.remove(index);
-                    }
+            match inner_replication_loop(&app_state_clone, &config_clone).await {
+                Ok(_) => {
+                    println!("Replication loop completed successfully");
+                    tracing::info!("Replication loop completed successfully");
+                },
+                Err(e) => {
+                    println!("Replication loop failed: {:?}", e);
+                    tracing::error!("Replication loop failed: {:?}", e);
                 }
             }
         });
     }
 }
+async fn inner_replication_loop(
+    app_state_clone: &Arc<Mutex<AppState>>,
+    config_clone: &DatabaseConfig,
+) -> Result<(), anyhow::Error> {
+    let retry_interval = config_clone.replication.retry_interval;
+    println!("DIAGNOSTIC: Retry interval: {}", retry_interval);
+    tracing::info!("DIAGNOSTIC: Retry interval: {}", retry_interval);
+
+    // Use Actix runtime's sleep and move ownership
+    let sleep_future = async move {
+        println!("DIAGNOSTIC: Before sleep");
+        tracing::info!("DIAGNOSTIC: Before sleep");
+
+        rt::time::sleep(Duration::from_secs(retry_interval as u64)).await;
+
+        println!("DIAGNOSTIC: After sleep");
+        tracing::info!("DIAGNOSTIC: After sleep");
+    };
+
+    // Use a timeout with Actix runtime
+    match rt::time::timeout(
+        Duration::from_secs((retry_interval + 5) as u64),
+        sleep_future
+    ).await {
+        Ok(_) => {
+            println!("DIAGNOSTIC: Sleep completed successfully");
+            tracing::info!("DIAGNOSTIC: Sleep completed successfully");
+        }
+        Err(_) => {
+            println!("DIAGNOSTIC: Sleep timed out");
+            tracing::warn!("DIAGNOSTIC: Sleep timed out");
+        }
+    }
+
+    println!("DIAGNOSTIC: End of function");
+    tracing::info!("DIAGNOSTIC: End of function");
+
+    Ok(())
+}
+
+
+
+async fn inner_replication_loop2(
+    app_state_clone: &Arc<Mutex<AppState>>,
+    config_clone: &DatabaseConfig,
+) -> Result<(), anyhow::Error> {
+    let retry_interval = config_clone.replication.retry_interval;
+    debug!("Passive replication timer set for {} seconds", retry_interval);
+
+    actix_web::rt::time::sleep(Duration::from_secs(retry_interval as u64)).await;
+
+    debug!("Passive replication loop started");
+
+    let mut processed_requests = Vec::new();
+
+    // Use anyhow for more flexible error handling
+    let app_state_guard = app_state_clone.lock().map_err(|e| {
+        error!("Failed to acquire lock on app_state: {}", e);
+        anyhow::anyhow!("Failed to acquire app_state lock: {}", e)
+    })?;
+
+    let queue_lock = app_state_guard.passive_replication_queue.lock().map_err(|e| {
+        error!("Failed to acquire lock on passive_replication_queue: {}", e);
+        anyhow::anyhow!("Failed to acquire passive_replication_queue lock: {}", e)
+    })?;
+
+    let mut queue = queue_lock;
+    debug!("Queue Length: {}", queue.queue.len());
+
+    for (index, queued_req) in queue.queue.iter_mut().enumerate() {
+        debug!("Processing Request Index: {}, Attempts: {}", index, queued_req.attempts);
+        let should_retry = match (queued_req.last_attempt, queued_req.attempts) {
+            (Some(last_attempt), attempts) if attempts > 0 => {
+                debug!("last_attempt: {:?}", last_attempt);
+                debug!("attempts: {}", attempts);
+                let time_since_last_attempt = chrono::Utc::now() - last_attempt;
+                debug!("time_since_last_attempt: {:?}", time_since_last_attempt);
+                debug!("config_clone.replication.retry_interval: {}", config_clone.replication.retry_interval);
+                debug!("config_clone.replication.max_replication_attempts: {}", config_clone.replication.max_replication_attempts);
+
+                let retry_condition = time_since_last_attempt >= chrono::Duration::seconds(config_clone.replication.retry_interval) &&
+                    attempts < config_clone.replication.max_replication_attempts;
+                debug!("retry_condition: {}", retry_condition);
+                retry_condition
+            },
+            (None, _) => true,
+            _ => {
+                debug!("should_retry defaulting to false");
+                false
+            },
+        };
+
+        debug!("should_retry: {}", should_retry);
+        if should_retry {
+            debug!("Attempting replication for request index: {}", index);
+
+            match try_replicate_to_nodes(config_clone, &queued_req.request).await {
+                Ok(_) => {
+                    debug!("Replication successful for request index: {}", index);
+                    processed_requests.push(index);
+                },
+                Err(ReplicationError::ReplicationFailure(failed_nodes_str)) => {
+                    error!("Replication failed: {}", failed_nodes_str);
+                    queued_req.failed_nodes = failed_nodes_str
+                        .replace("Failed nodes: ", "")
+                        .split(", ")
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    queued_req.attempts += 1;
+                    queued_req.last_attempt = Some(chrono::Utc::now());
+
+                    if queued_req.first_failed_attempt.is_none() {
+                        queued_req.first_failed_attempt = Some(chrono::Utc::now());
+                    }
+                },
+                Err(e) => {
+                    error!("An unexpected error occurred during replication: {:?}", e);
+                    queued_req.attempts += 1;
+                    queued_req.last_attempt = Some(chrono::Utc::now());
+                },
+            }
+        } else {
+            debug!("Skipping replication for request index: {}, should_retry: {}", index, should_retry);
+        }
+    }
+
+    for &index in processed_requests.iter().rev() {
+        queue.queue.remove(index);
+        debug!("Removed processed request at index: {}", index);
+    }
+    debug!("Processed requests removed from queue. Queue length now: {}", queue.queue.len());
+
+    debug!("Passive replication loop iteration finished");
+
+    Ok(())
+}
+
 
 // Helper function to attempt replication to all nodes
 async fn try_replicate_to_nodes(
     config: &DatabaseConfig,
-    request: &ReplicationRequest
+    request: &ReplicationRequest,
 ) -> Result<(), ReplicationError> {
+    info!("Attempting to replicate to nodes");
     let nodes = load_nodes(config)
         .map_err(|e| ReplicationError::ConfigLoadError(e))?;
 
+    let client = awc::Client::default();
+
     let mut failed_nodes: Vec<String> = Vec::new();
 
-    // Process nodes sequentially to maintain order
     for node in nodes.nodes.iter().filter(|n|
         request.entries.iter().all(|entry| n.should_replicate(&entry.table_name))
     ) {
-        match replicate_to_single_node(node, request).await {
-            Ok(true) => continue,
+        info!("Try Passive Replicating to node: {}", node.name);
+        match replicate_to_single_node(&client, node, request).await { // Pass the client here
+            Ok(true) => {continue}, // Replication successful for this node
             Ok(false) | Err(_) => {
                 failed_nodes.push(node.name.clone());
                 return Err(ReplicationError::ReplicationFailure(
@@ -254,11 +351,10 @@ async fn try_replicate_to_nodes(
         }
     }
 
-    // If we've gone through all nodes without returning an error, it means all succeeded
     if failed_nodes.is_empty() {
         Ok(())
     } else {
-        // This should not happen given the early return, but kept for completeness
+        // This should ideally not be reached due to the early return, but it's included for safety.
         Err(ReplicationError::ReplicationFailure(
             format!("Failed nodes: {}", failed_nodes.join(", "))
         ))
@@ -266,50 +362,6 @@ async fn try_replicate_to_nodes(
 }
 
 
-
-
-async fn replicate_to_single_node(
-    node: &ReplicationNode,
-    request: &ReplicationRequest
-) -> Result<bool, String> {
-    // Use the existing client or create a new one (assuming using awc)
-    let client = awc::Client::new();
-
-    // Prepare the replication request
-    let replication_request = ReplicationRequest {
-        schema: request.schema.clone(),
-        entries: request.entries.clone(),
-        target_node: node.clone(),
-    };
-
-    // Attempt to send the replication request to the node
-    match client
-        .post(format!("{}/api/replication/push", node.node_url))
-        .send_json(&replication_request)
-        .await
-    {
-        Ok(mut response) => {
-            // Check if the response was successful
-            if response.status().is_success() {
-                // Parse the response
-                match response.json::<ReplicationResponse>().await {
-                    Ok(repl_response) => {
-                        if repl_response.status == "success" {
-                            Ok(true)
-                        } else {
-                            Err(format!("Replication failed: {}",
-                                        repl_response.message.unwrap_or_default()))
-                        }
-                    }
-                    Err(_) => Err("Failed to parse replication response".to_string())
-                }
-            } else {
-                Err(format!("HTTP error: {}", response.status()))
-            }
-        }
-        Err(e) => Err(format!("Network error: {}", e))
-    }
-}
 
 
 // Actix route for initiating passive replication

@@ -19,6 +19,7 @@ use base64::{engine::general_purpose, Engine as _};
 use tracing::log::{debug, error, info, warn};
 use crate::executer::executer::{ global_execute_query};
 use crate::query::parser::{sql_parser, ASTNode};
+use crate::replication::replication_nodes::load_nodes;
 use crate::tables::table::{create_table, delete_row};
 // Import sql_parser
 
@@ -465,121 +466,98 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
     // Log request details
     debug!("Incoming request method: {}", req.method());
     debug!("Request URI: {}", req.uri());
-
     // Log all headers for debugging
     for (name, value) in req.headers() {
         debug!("Header - {}: {:?}", name, value);
     }
-
     // Check for Authorization header
     match req.headers().get("Authorization") {
         Some(auth_header) => {
-            // Try to convert header to string
             match auth_header.to_str() {
                 Ok(auth_str) => {
                     debug!("Authorization header found: {}", auth_str);
 
-                    // Check for Basic auth
-                    if !auth_str.starts_with("Basic ") {
-                        warn!("Authorization header does not start with 'Basic '");
-                        return Err(ErrorUnauthorized("Invalid authorization method"));
-                    }
+                    // Check for "Basic" authentication
+                    if auth_str.starts_with("Basic ") {
+                        let encoded_credentials = &auth_str[6..];
 
-                    // Attempt base64 decoding
-                    let encoded_credentials = &auth_str[6..];
-                    debug!("Encoded credentials: {}", encoded_credentials);
-                    match general_purpose::STANDARD.decode(encoded_credentials) {
-                        Ok(decoded_credentials) => {
-                            // Convert to UTF-8 string
-                            match String::from_utf8(decoded_credentials) {
-                                Ok(credentials_str) => {
-                                    debug!("Decoded credentials: {}", credentials_str);
+                        // 1. Attempt regular user authentication first
+                        match general_purpose::STANDARD.decode(encoded_credentials) {
+                            Ok(decoded_credentials) => {
+                                match String::from_utf8(decoded_credentials) {
+                                    Ok(credentials_str) => {
+                                        let parts: Vec<&str> = credentials_str.split(':').collect();
+                                        if parts.len() == 2 {
+                                            let (username, password) = (parts[0], parts[1]);
 
-                                    // Split credentials
-                                    let parts: Vec<&str> = credentials_str.split(':').collect();
-
-                                    if parts.len() != 2 {
-                                        warn!("Invalid credentials format");
-                                        return Err(ErrorUnauthorized("Invalid credentials format"));
-                                    }
-
-                                    let (username, password) = (parts[0], parts[1]);
-                                    debug!("Attempting to authenticate user: {} with password: {}", username, password);
-
-                                    // Fetch user from database
-                                    match fetch_user_from_db(username, state).await {
-                                        Some(user) => {
-                                            debug!("User found in database with stored password_hash: {}", user.password_hash);
-
-                                            // Password check with detailed logging
-                                            debug!("Comparing provided password: '{}' with stored hash: '{}'", password, user.password_hash);
-
-                                            // Check password equality with length info
-                                            let password_matches = user.password_hash == password;
-                                            debug!("Password match result: {}", password_matches);
-                                            debug!("Password lengths - provided: {} chars, stored: {} chars",
-                                                   password.len(), user.password_hash.len());
-
-                                            // Check for whitespace or special characters
-                                            let has_whitespace_provided = password.contains(char::is_whitespace);
-                                            let has_whitespace_stored = user.password_hash.contains(char::is_whitespace);
-                                            debug!("Whitespace check - provided password: {}, stored hash: {}",
-                                                   has_whitespace_provided, has_whitespace_stored);
-
-                                            if password_matches {
-                                                info!("Authentication successful for user: {}", username);
-
-                                                // Insert user into request extensions
-                                                req.extensions_mut().insert(user);
-                                                return Ok(());
-                                            } else {
-                                                warn!("Password mismatch for user: {}", username);
-                                                debug!("Byte-by-byte comparison:");
-
-                                                let min_len = password.len().min(user.password_hash.len());
-                                                for i in 0..min_len {
-                                                    let p_char = &password[i..=i];
-                                                    let h_char = &user.password_hash[i..=i];
-                                                    debug!("Position {}: '{}' vs '{}', match: {}",
-                                                           i, p_char, h_char, p_char == h_char);
-                                                }
-
-                                                if password.len() != user.password_hash.len() {
-                                                    debug!("Length mismatch: Password has {} extra chars, hash has {} extra chars",
-                                                           password.len().saturating_sub(user.password_hash.len()),
-                                                           user.password_hash.len().saturating_sub(password.len()));
+                                            match fetch_user_from_db(username, state).await {
+                                                Some(user) => {
+                                                    if user.password_hash == password {
+                                                        info!("User authenticated: {}", username);
+                                                        req.extensions_mut().insert(user);
+                                                        return Ok(()); // Successful user authentication
+                                                    } else {
+                                                        warn!("Incorrect password for user: {}", username);
+                                                        // Fall through to check for replication node auth
+                                                    }
+                                                },
+                                                None => {
+                                                    warn!("No user found with username: {}", username);
+                                                    // Fall through to check for replication node auth
                                                 }
                                             }
-                                        },
-                                        None => {
-                                            warn!("No user found for username: {}", username);
+                                        } else {
+                                            warn!("Invalid credentials format (not username:password)");
+                                            return Err(ErrorUnauthorized("Invalid credentials format"));
                                         }
+                                    },
+                                    Err(e) => {
+                                        error!("UTF-8 conversion error: {:?}", e);
+                                        return Err(ErrorUnauthorized("Invalid credentials"));
                                     }
-                                },
-                                Err(e) => {
-                                    error!("Failed to convert decoded credentials to UTF-8: {:?}", e);
                                 }
+                            },
+                            Err(e) => {
+                                warn!("Base64 decoding failed: {:?}", e);
+                                //Might be a replication node, so fall through
                             }
-                        },
-                        Err(e) => {
-                            error!("Base64 decoding failed: {:?}", e);
                         }
+
+                        // 2. If user authentication fails, try replication node authentication
+                        let config = &state.config;
+                        let nodes_config = match load_nodes(config) {
+                            Ok(config) => config,
+                            Err(_) => return Err(ErrorUnauthorized("Could not load node configuration")),
+                        };
+
+                        if let Some(node) = nodes_config.nodes.iter().find(|node| {
+                            let credentials = format!("{}:{}", node.name, node.shared_secret);
+                            let encoded_credentials = general_purpose::STANDARD.encode(credentials);
+                            format!("Basic {}", encoded_credentials) == auth_str
+                        }) {
+                            info!("Replication node authenticated: {}", node.name);
+                            // Add any specific logic for handling authenticated replication nodes here.
+                            return Ok(());
+                        } else {
+                            warn!("Invalid shared secret for replication node");
+                        }
+                    } else {
+                        warn!("Authorization header does not start with 'Basic '");
                     }
                 },
+
                 Err(e) => {
                     error!("Failed to convert Authorization header to string: {:?}", e);
                 }
             }
         },
         None => {
-            debug!("No Authorization header present in the request");
+            debug!("No Authorization header present");
         }
     }
-
-    // If we reach here, authentication failed
-    warn!("Authentication failed - returning Unauthorized");
-    Err(ErrorUnauthorized("Invalid credentials"))
+    return Err(ErrorUnauthorized("Invalid credentials"));
 }
+
 
 
 

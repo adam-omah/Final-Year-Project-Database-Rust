@@ -1,5 +1,5 @@
 
-use actix_web::{post, web, Error, HttpResponse};
+use actix_web::{post, web, Error, HttpRequest, HttpResponse};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use crate::config::database_config::DatabaseConfig;
 use crate::tables::table::recalculate_table_global;
 use crate::recovery::recovery::LogRecoveryManager;
 use crate::replication::passive_replication::{get_replication_queue_status, queue_passive_replication};
-use crate::replication::replication_nodes::{load_nodes, ReplicationMode, ReplicationNode};
+use crate::replication::replication_nodes::{load_nodes, validate_shared_secret, ReplicationMode, ReplicationNode};
 use crate::schema::schema::{refresh_schema, Schema};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -142,7 +142,6 @@ pub fn replicate_change_to_nodes(
     // Spawn an async task for replication
     actix_web::rt::spawn(async move {
         let client = Client::default();
-
         let mut all_nodes_success = true;
 
         // Attempt to replicate to each node
@@ -180,8 +179,15 @@ pub async fn replicate_to_single_node(
     client: &Client,
     node: &ReplicationNode,
     request: &ReplicationRequest,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    let addrs = node.resolve_node_url().map_err(|e| e.to_string())?;
+) -> Result<bool, Box<dyn std::error::Error>> { // Original return type
+
+    let addrs = match node.resolve_node_url() {
+        Ok(addrs) => addrs,
+        Err(e) => {
+            error!("Failed to resolve address for node {}: {}", node.name, e);
+            return Err(e.into());
+        }
+    };
     let target_addr = addrs.first().ok_or("Could not resolve any addresses")?;
     let url = if node.node_url.starts_with("https") {
         format!("https://{}/api/replication/push", target_addr)
@@ -189,8 +195,8 @@ pub async fn replicate_to_single_node(
         format!("http://{}/api/replication/push", target_addr)
     };
     info!("Replication Node: {:#?}", node);
-    info!("Replicating to URL: {}", url);  // Add trace log for URL
-    trace!("Replication request: {:?}", request); // Add trace log for the request
+    info!("Replicating to URL: {}", url);
+    trace!("Replication request: {:?}", request);
 
     // Now use target_addr for awc requests
     let mut response = client
@@ -212,8 +218,10 @@ fn fallback_to_passive_replication(
     state: Arc<AppState>,
     replication_request: ReplicationRequest
 ) {
+    info!("Passive replication queued for target node: {:#?}, entries: {:#?}", replication_request.target_node, replication_request.entries);
     let mut queue = state.passive_replication_queue.lock().unwrap();
     queue.enqueue(replication_request);
+    info!("Passive replication request queued");
 }
 
 
@@ -239,6 +247,15 @@ async fn replication_push(
         tracing::warn!("Entry {}: {:?}", i, entry);
     }
 
+    // Validate shared secret
+    let validation_result = validate_shared_secret(&*payload, &app_state.clone());
+    if let Err(error_message) = validation_result {
+        return Ok(HttpResponse::Unauthorized().json(ReplicationResponse {
+            status: "unauthorized".into(),
+            message: Some(error_message),
+        }));
+    }
+    info!("Shared secret validated");
     // Load nodes configuration
     let nodes_config = match load_nodes(&app_state.config) {
         Ok(config) => config,
@@ -250,7 +267,7 @@ async fn replication_push(
             }));
         }
     };
-
+    info!("nodes config loaded");
     // Find the specific node configuration for the target node
     let target_node_config = nodes_config.nodes.iter()
         .find(|node| node.name == payload.target_node.name)
@@ -259,6 +276,7 @@ async fn replication_push(
             actix_web::error::ErrorBadRequest("Invalid target node")
         })?;
 
+    info!("Found Target node config:{:#?}",target_node_config);
 
     // Identify CREATE operations explicitly
     let create_or_drop_entries: Vec<&ChangeLogEntry> = payload.entries.iter()

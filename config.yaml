@@ -12,5 +12,5 @@ node_port: 8080
 replication:
   max_offline_duration: 86400 # 24 hours in seconds
   max_replication_attempts: 10
-  retry_interval: 60 # 5 minutes in seconds
+  retry_interval: 1 # 1 minutes in seconds
   sync_interval: 60 # Sync every 60 minutes - configure a value if you want it to be scheduled.  0 means that it's not scheduled at all and must be called manually.

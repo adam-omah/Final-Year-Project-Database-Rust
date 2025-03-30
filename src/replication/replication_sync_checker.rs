@@ -5,6 +5,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use actix_web::{post, web, HttpResponse, Responder};
+use base64::Engine;
+use base64::engine::general_purpose;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::log::{debug, error, info, trace, warn};
@@ -118,8 +120,21 @@ async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig
     debug!("Fetching table data for node {} with config: {:?}", node.name, config);
 
     let client = awc::Client::default();
+    // Add Basic Auth headers
+    let credentials = format!("{}:{}", node.name, node.shared_secret); // Combine node_name and shared_secret
+    let encoded_credentials = general_purpose::STANDARD.encode(credentials);
+    info!("Encoded credentials: {}", encoded_credentials); // Log for debugging
+
+    let auth_header_value = format!("Basic {}", encoded_credentials);
+    info!("Authorization header value: {}", auth_header_value);
     // Format API address to correct address.
-    let addrs = node.resolve_node_url().map_err(|e| e.to_string())?;
+    let addrs = match node.resolve_node_url() {
+        Ok(addrs) => addrs,
+        Err(e) => {
+            error!("Failed to resolve address for node {}: {}", node.name, e);
+            return Err(e.into());
+        }
+    };
     let target_addr = addrs.first().ok_or("Could not resolve any addresses")?;
 
     match &node.replication_mode {
@@ -134,6 +149,7 @@ async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig
 
             let mut table_list_response = client.get(tables_url)
                 .insert_header(("User-Agent", "Actix-web"))
+                .insert_header(("Authorization", auth_header_value))
                 .send()
                 .await?;
 
@@ -421,7 +437,13 @@ async fn replicate_changes_from_node(
     info!("Requesting sync from node {}", node.name);
 
     // Build the URL for the sync endpoint on the other node
-    let addrs = node.resolve_node_url().map_err(|e| e.to_string())?;
+    let addrs = match node.resolve_node_url() {
+        Ok(addrs) => addrs,
+        Err(e) => {
+            error!("Failed to resolve address for node {}: {}", node.name, e);
+            return Err(e.into());
+        }
+    };
     let target_addr = addrs.first().ok_or("Could not resolve any addresses")?;
 
     let sync_url = if node.node_url.starts_with("https") {
@@ -435,10 +457,17 @@ async fn replicate_changes_from_node(
     // Create an awc client
     let client = awc::Client::default();
 
+    // Add Authorization header with node credentials
+    let credentials = format!("{}:{}", node.name, node.shared_secret);
+    let encoded_credentials = general_purpose::STANDARD.encode(credentials);
+    let auth_header_value = format!("Basic {}", encoded_credentials);
+
+
     // Send a POST request to the sync endpoint
     let mut response = client
         .post(sync_url)
         .insert_header(("User-Agent", "Actix-web"))
+        .insert_header(("Authorization", auth_header_value))
         .send()
         .await?;
 
@@ -483,9 +512,14 @@ async fn fetch_current_logs(config: &crate::DatabaseConfig, table_name: &str) ->
 async fn fetch_logs_from_node(node: &ReplicationNode, config: &crate::DatabaseConfig, table_name: &str) -> Result<Vec<ChangeLogEntry>, Box<dyn std::error::Error>> {
     let client = awc::Client::default();
     // Format API address to correct address.
-    let addrs = node.resolve_node_url().map_err(|e| e.to_string())?;
+    let addrs = match node.resolve_node_url() {
+        Ok(addrs) => addrs,
+        Err(e) => {
+            error!("Failed to resolve address for node {}: {}", node.name, e);
+            return Err(e.into());
+        }
+    };
     let target_addr = addrs.first().ok_or("Could not resolve any addresses")?;
-
     let logs_url = if node.node_url.starts_with("https") {
         format!("https://{}/api/logs/{}", target_addr, table_name)
     } else {
@@ -493,8 +527,13 @@ async fn fetch_logs_from_node(node: &ReplicationNode, config: &crate::DatabaseCo
     };
     info!("Fetching logs from: {}", logs_url);
 
+    let credentials = format!("{}:{}", node.name, node.shared_secret); // Combine node_name and shared_secret
+    let encoded_credentials = general_purpose::STANDARD.encode(credentials); // Base64 encode
+    let auth_header_value = format!("Basic {}", encoded_credentials);
+
     let response = client.get(logs_url)
         .insert_header(("User-Agent", "Actix-web"))
+        .insert_header(("Authorization", auth_header_value))
         .send()
         .await;
 
@@ -566,7 +605,7 @@ async fn replicate_changes_to_node(
         }
         Err(e) => {
             error!("Error during replication to node {}: {}", node.name, e);
-            Err(e)
+            Err(e.into())
         }
     }
 }

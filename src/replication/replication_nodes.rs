@@ -2,7 +2,7 @@ use std::{fs, io};
 use std::fs::File;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
-use actix_web::{get, post, web, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
 use actix_web::web::Data;
 use awc::Client;
 use futures::TryStreamExt;
@@ -127,6 +127,7 @@ pub fn load_nodes(config: &DatabaseConfig) -> io::Result<NodesConfig> {
     info!("Loading replication nodes from: {}", path.display());
     if path.exists() {
         let file = fs::File::open(path)?;
+        info!("Loaded replication nodes from path ");
         serde_json::from_reader(file).map_err(|e|
             io::Error::new(io::ErrorKind::InvalidData, format!("JSON parsing failed: {}", e))
         )
@@ -405,6 +406,47 @@ fn update_local_node_configuration(
         nodes_config.nodes.push(new_node);
     }
 }
+
+pub fn validate_shared_secret(
+    replication_request: &ReplicationRequest,
+    state: &AppState
+) -> Result<(), String> {
+    // Get the configuration from app state
+    let config = state.config.clone();
+
+    // Load the nodes configuration
+    let nodes_config = match load_nodes(&config) {
+        Ok(config) => config,
+        Err(e) => {
+            error!("Could not load node configuration: {}", e); // Log the error
+            return Err(format!("Could not load node configuration: {}", e));
+        }
+    };
+    debug!("Loaded nodes config: {:?}", nodes_config); // Log the loaded config
+
+    // Find a node with a matching shared secret and node URL
+    let valid_node = nodes_config.nodes.iter().find(|node| {
+        let name_matches = node.name == replication_request.target_node.name;
+        let secret_matches = node.shared_secret == replication_request.target_node.shared_secret;
+        debug!(
+            "Checking node: name match = {}, Secret match = {}",
+            name_matches, secret_matches
+        );
+        name_matches && secret_matches
+    });
+
+    match valid_node {
+        Some(node) => {
+            info!("Valid shared secret for replication request from node: {:?}", node); // Log the validated node
+            Ok(())
+        },
+        None => {
+            error!("Invalid shared secret for replication request. No matching node found."); // Log the error
+            Err("Invalid shared secret for replication request".to_string())
+        }
+    }
+}
+
 
 pub fn configure_node_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(register_node)

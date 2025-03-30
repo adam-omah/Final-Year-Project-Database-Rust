@@ -92,15 +92,38 @@ impl AppState {
 
     // Method to start passive replication service
     fn start_passive_replication_service(&self) {
+        // Add more detailed logging
+        tracing::info!("Attempting to start passive replication service");
+
         let config = self.config.clone();
         let app_state = Arc::new(Mutex::new(self.clone()));
 
-        // Start the passive replication service
-        let mut replication_service = self.passive_replication_service.lock().unwrap();
-        replication_service.start(
-            app_state,
-            config
-        );
+        // Additional diagnostic print
+        println!("DIAGNOSTIC: Preparing to start passive replication service");
+        tracing::debug!("Cloned config: {:?}", config);
+
+        // Ensure we're not swallowing any potential errors
+        match self.passive_replication_service.lock() {
+            Ok(mut replication_service) => {
+                tracing::info!("Successfully acquired lock on passive replication service");
+
+                // Add a guard to prevent multiple starts
+                if !replication_service.is_running {
+                    println!("DIAGNOSTIC: Starting passive replication service");
+                    replication_service.start(
+                        app_state,
+                        config
+                    );
+                    tracing::info!("Passive replication service started");
+                } else {
+                    tracing::warn!("Passive replication service already running");
+                }
+            },
+            Err(e) => {
+                tracing::error!("Failed to acquire lock on passive replication service: {:?}", e);
+                println!("DIAGNOSTIC: Failed to acquire lock on passive replication service");
+            }
+        }
     }
 
     pub fn set_global_state(self) {
@@ -176,6 +199,8 @@ async fn main() -> std::io::Result<()> {
     } else {
         panic!("Failed to initialize global application state");
     }
+
+
     // Create default admin user if not exists
     if let Err(e) = create_default_user(&app_state).await {
         error!("Failed to create default admin user: {}", e);

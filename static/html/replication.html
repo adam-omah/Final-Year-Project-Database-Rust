@@ -85,121 +85,156 @@
 </div>
 
 <script>
-    // Dynamically load current nodes
-    async function loadCurrentNodes() {
-        try {
-            const response = await fetch('/api/load-nodes');
-            if (!response.ok) {
-                throw new Error('Failed to fetch nodes');
-            }
-            const nodesConfig = await response.json();
-            const nodes = nodesConfig.nodes;
-            const nodeListContainer = document.getElementById('current-nodes');
+    // user logged in check
+    document.addEventListener('DOMContentLoaded', () => {
+        const userInfo = localStorage.getItem('userInfo');
 
-            if (nodes.length === 0) {
-                nodeListContainer.innerHTML = '<p>No nodes registered yet.</p>';
-                return;
+        if (!userInfo) {
+            window.location.href = '/login-page';
+            return;
+        }
+
+
+        const originalFetch = window.fetch; // Store original fetch
+
+        window.fetch = async (url, options = {}) => {
+            const userInfo = JSON.parse(localStorage.getItem('userInfo'));
+            if (userInfo && userInfo.username && userInfo.password_hash) {
+                const encodedCredentials = btoa(`${userInfo.username}:${userInfo.password_hash}`);
+                options.headers = {
+                    ...options.headers,
+                    'Authorization': `Basic ${encodedCredentials}`
+                };
             }
 
-            const nodeListHTML = nodes.map(node => `
+            const response = await originalFetch(url, options); // Use originalFetch here
+
+            if (response.status === 401) {
+                localStorage.removeItem('userInfo');
+                window.location.href = '/login-page';
+                return null;
+            }
+
+            return response;
+        };
+
+        loadCurrentNodes();
+
+
+
+        // Dynamically load current nodes
+        async function loadCurrentNodes() {
+            try {
+                const response = await fetch('/api/load-nodes');
+                if (!response.ok) {
+                    throw new Error('Failed to fetch nodes');
+                }
+                const nodesConfig = await response.json();
+                const nodes = nodesConfig.nodes;
+                const nodeListContainer = document.getElementById('current-nodes');
+
+                if (nodes.length === 0) {
+                    nodeListContainer.innerHTML = '<p>No nodes registered yet.</p>';
+                    return;
+                }
+
+                const nodeListHTML = nodes.map(node => `
             <div class="node-item">
                 <h3>${node.name}</h3>
                 <p><strong>Description:</strong> ${node.description}</p>
                 <p><strong>URL:</strong> ${node.node_url}</p>
                 <p><strong>Replication Mode:</strong>
                     ${node.replication_mode === 'All'
-                ? 'All Tables'
-                : `Specific Tables: ${
-                    Array.isArray(node.replication_mode.Specific)
-                        ? node.replication_mode.Specific.join(', ')
-                        : node.replication_mode.Specific
-                }`}
+                    ? 'All Tables'
+                    : `Specific Tables: ${
+                        Array.isArray(node.replication_mode.Specific)
+                            ? node.replication_mode.Specific.join(', ')
+                            : node.replication_mode.Specific
+                    }`}
                 </p>
                 <p><strong>Shared Secret:</strong> ${node.shared_secret}</p>
             </div>
         `).join('');
 
-            nodeListContainer.innerHTML = `
+                nodeListContainer.innerHTML = `
             <h2>Current Registered Nodes</h2>
             ${nodeListHTML}
         `;
-        } catch (error) {
-            console.error('Error loading nodes:', error);
-            document.getElementById('current-nodes').innerHTML =
-                `<p class="error">Failed to load nodes: ${error.message}</p>`;
-        }
-    }
-
-
-    // Handle replication mode selection
-    document.getElementById('replication-mode').addEventListener('change', function() {
-        const specificTablesDiv = document.getElementById('specific-tables');
-        specificTablesDiv.style.display =
-            this.value === 'Specific' ? 'block' : 'none';
-    });
-
-    // Handle cross-node registration
-    document.getElementById('cross-node-registration').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const nodeName = document.getElementById('node-name').value;
-        const nodeUrl = document.getElementById('node-url').value;
-        const replicationMode = document.getElementById('replication-mode').value;
-
-        let replicationModeData = replicationMode === 'All'
-            ? { type: 'All' }
-            : {
-                type: 'Specific',
-                tables: document.getElementById('table-list').value
-                    .split(',')
-                    .map(table => table.trim())
-                    .filter(table => table !== '')
-            };
-
-        try {
-            const sharedSecret = crypto.randomUUID();
-            const response = await fetch('/api/cross-node-register', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    source_node: {
-                        name: nodeName,
-                        node_url: nodeUrl + (document.getElementById('node-port').value
-                            ? `:${document.getElementById('node-port').value}`
-                            : ''),
-                        description: document.getElementById('node-description').value
-                            || 'Cross-node registration',
-                        replication_mode: replicationModeData.type === 'All'
-                            ? 'All'
-                            : { Specific: replicationModeData.tables },
-                        shared_secret: sharedSecret
-                    },
-                    proposed_shared_secret: sharedSecret
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error('Node registration failed');
+            } catch (error) {
+                console.error('Error loading nodes:', error);
+                document.getElementById('current-nodes').innerHTML =
+                    `<p class="error">Failed to load nodes: ${error.message}</p>`;
             }
-
-            const result = await response.json();
-            alert('Node registered successfully!');
-
-            // Reload nodes list
-            loadCurrentNodes();
-
-            // Reset form
-            e.target.reset();
-            document.getElementById('specific-tables').style.display = 'none';
-        } catch (error) {
-            console.error('Registration error:', error);
-            alert(`Registration failed: ${error.message}`);
         }
-    });
 
-    // Initial load of nodes
-    loadCurrentNodes();
+
+        // Handle replication mode selection
+        document.getElementById('replication-mode').addEventListener('change', function () {
+            const specificTablesDiv = document.getElementById('specific-tables');
+            specificTablesDiv.style.display =
+                this.value === 'Specific' ? 'block' : 'none';
+        });
+
+        // Handle cross-node registration
+        document.getElementById('cross-node-registration').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const nodeName = document.getElementById('node-name').value;
+            const nodeUrl = document.getElementById('node-url').value;
+            const replicationMode = document.getElementById('replication-mode').value;
+
+            let replicationModeData = replicationMode === 'All'
+                ? {type: 'All'}
+                : {
+                    type: 'Specific',
+                    tables: document.getElementById('table-list').value
+                        .split(',')
+                        .map(table => table.trim())
+                        .filter(table => table !== '')
+                };
+
+            try {
+                const sharedSecret = crypto.randomUUID();
+                const response = await fetch('/api/cross-node-register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        source_node: {
+                            name: nodeName,
+                            node_url: nodeUrl + (document.getElementById('node-port').value
+                                ? `:${document.getElementById('node-port').value}`
+                                : ''),
+                            description: document.getElementById('node-description').value
+                                || 'Cross-node registration',
+                            replication_mode: replicationModeData.type === 'All'
+                                ? 'All'
+                                : {Specific: replicationModeData.tables},
+                            shared_secret: sharedSecret
+                        },
+                        proposed_shared_secret: sharedSecret
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Node registration failed');
+                }
+
+                const result = await response.json();
+                alert('Node registered successfully!');
+
+                // Reload nodes list
+                loadCurrentNodes();
+
+                // Reset form
+                e.target.reset();
+                document.getElementById('specific-tables').style.display = 'none';
+            } catch (error) {
+                console.error('Registration error:', error);
+                alert(`Registration failed: ${error.message}`);
+            }
+        });
+    });
 </script>
 </body>
 </html>

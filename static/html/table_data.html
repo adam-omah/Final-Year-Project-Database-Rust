@@ -41,166 +41,180 @@
 </div>
 
 <script>
-    const tableName = location.pathname.split('/').pop(); // Extract table name from URL
-    const tableTitle = document.getElementById('table-title');
-    tableTitle.textContent = `Table: ${tableName}`;
+    document.addEventListener('DOMContentLoaded', () => {
+        const tableName = location.pathname.split('/').pop();
+        const tableTitle = document.getElementById('table-title');
+        tableTitle.textContent = `Table: ${tableName}`;
 
-    /**
-     * Fetch and return column names for the table.
-     */
-    async function fetchColumnNames() {
-        try {
-            const response = await fetch(`/api/tables/${tableName}/columns`);
-            if (!response.ok) {
-                throw new Error(`Failed to fetch column names: ${response.statusText}`);
+        const originalFetch = window.fetch;
+
+        window.fetch = async (url, options = {}) => {
+            const userInfo = JSON.parse(localStorage.getItem('userInfo'));
+            if (userInfo && userInfo.username && userInfo.password_hash) {
+                const encodedCredentials = btoa(`${userInfo.username}:${userInfo.password_hash}`);
+                options.headers = {
+                    ...options.headers,
+                    'Authorization': `Basic ${encodedCredentials}`
+                };
             }
-            const columnNames = await response.json();
-            if (!Array.isArray(columnNames) || columnNames.length === 0) {
-                throw new Error('No columns found for this table.');
+
+            const response = await originalFetch(url, options);
+
+            if (response.status === 401) {
+                localStorage.removeItem('userInfo');
+                window.location.href = '/login-page';
+                return null;
             }
-            return columnNames;
-        } catch (error) {
-            const errorMessageDiv = document.getElementById('error-message');
-            errorMessageDiv.style.display = 'block';
-            errorMessageDiv.textContent = `Error: ${error.message}`;
-            throw error; // Re-throw error to prevent further table loading
+            return response;
+        };
+
+        async function fetchColumnNames() {
+            try {
+                const response = await fetch(`/api/tables/${tableName}/columns`);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch column names: ${response.statusText}`);
+                }
+                const columnNames = await response.json();
+                if (!Array.isArray(columnNames) || columnNames.length === 0) {
+                    throw new Error('No columns found for this table.');
+                }
+                return columnNames;
+            } catch (error) {
+                const errorMessageDiv = document.getElementById('error-message');
+                errorMessageDiv.style.display = 'block';
+                errorMessageDiv.textContent = `Error: ${error.message}`;
+                throw error;
+            }
         }
-    }
 
-    /**
-     * Fetch and render table data.
-     */
-    async function fetchTableData() {
-        try {
-            // Fetch the table data
-            const response = await fetch(`/api/tables/${tableName}`);
-            if (!response.ok) {
-                throw new Error(`Failed to fetch table data: ${response.statusText}`);
+        async function fetchTableData() {
+            try {
+                const response = await fetch(`/api/tables/${tableName}`);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch table data: ${response.statusText}`);
+                }
+                const tableData = await response.json();
+                if (!Array.isArray(tableData) || tableData.length <= 1) {
+                    throw new Error('No data in this table.');
+                }
+
+                const tableHead = document.getElementById('table-head');
+                const tableBody = document.getElementById('table-body');
+                const resultTable = document.getElementById('result-table');
+
+                tableHead.innerHTML = '';
+                tableBody.innerHTML = '';
+
+                const headers = tableData[0];
+                const headerRow = document.createElement('tr');
+                headers.forEach(header => {
+                    const th = document.createElement('th');
+                    th.textContent = header;
+                    headerRow.appendChild(th);
+                });
+                tableHead.appendChild(headerRow);
+
+                tableData.slice(1).forEach(row => {
+                    const rowElement = document.createElement('tr');
+                    row.forEach(cellValue => {
+                        const td = document.createElement('td');
+                        td.textContent = cellValue;
+                        rowElement.appendChild(td);
+                    });
+                    tableBody.appendChild(rowElement);
+                });
+
+                resultTable.style.display = 'table';
+                document.getElementById('error-message').style.display = 'none';
+
+            } catch (error) {
+                const errorMessageDiv = document.getElementById('error-message');
+                errorMessageDiv.style.display = 'block';
+                errorMessageDiv.textContent = `Error: ${error.message}`;
+                document.getElementById('result-table').style.display = 'none';
             }
-            const tableData = await response.json();
-            if (tableData.length <= 1) {
-                throw new Error('No data in this table.');
-            }
+        }
 
-            // Populate the table with the fetched data
-            const tableHead = document.getElementById('table-head');
-            const tableBody = document.getElementById('table-body');
-            const resultTable = document.getElementById('result-table');
 
-            // Clear any previous data
+        fetchTableData(); // Call to populate table initially
+
+
+        document.getElementById('execute-query').addEventListener('click', async () => {
+            const queryText = document.getElementById('query-box').value.trim();
+            const errorMessageDiv = document.getElementById('execute-error-message');
+            const resultTable = document.getElementById('execute-result-table');
+            const tableHead = document.getElementById('execute-table-head');
+            const tableBody = document.getElementById('execute-table-body');
+            // Clear previous results or errors
+            errorMessageDiv.style.display = 'none';
+            resultTable.style.display = 'none';
+            errorMessageDiv.textContent = '';
             tableHead.innerHTML = '';
             tableBody.innerHTML = '';
 
-            // First row contains column names (headers)
-            const columnNames = tableData[0];
-            const headerRow = document.createElement('tr');
-            columnNames.forEach(columnName => {
-                const th = document.createElement('th');
-                th.textContent = columnName;
-                headerRow.appendChild(th);
-            });
-            tableHead.appendChild(headerRow);
-
-            // Add table rows (skip the first row which contains headers)
-            tableData.slice(1).forEach(row => {
-                const rowElement = document.createElement('tr');
-                row.forEach(cellValue => {
-                    const td = document.createElement('td');
-                    td.textContent = cellValue;
-                    rowElement.appendChild(td);
-                });
-                tableBody.appendChild(rowElement);
-            });
-
-            // Show the table
-            resultTable.style.display = 'table';
-            document.getElementById('error-message').style.display = 'none';
-        } catch (error) {
-            const errorMessageDiv = document.getElementById('error-message');
-            errorMessageDiv.style.display = 'block';
-            errorMessageDiv.textContent = `Error: ${error.message}`;
-            document.getElementById('result-table').style.display = 'none';
-        }
-    }
-
-    document.addEventListener('DOMContentLoaded', fetchTableData);
-
-    // Execute query functionality (same as before)
-    document.getElementById('execute-query').addEventListener('click', async () => {
-        const queryText = document.getElementById('query-box').value.trim();
-        const errorMessageDiv = document.getElementById('execute-error-message');
-        const resultTable = document.getElementById('execute-result-table');
-        const tableHead = document.getElementById('execute-table-head');
-        const tableBody = document.getElementById('execute-table-body');
-        // Clear previous results or errors
-        errorMessageDiv.style.display = 'none';
-        resultTable.style.display = 'none';
-        errorMessageDiv.textContent = '';
-        tableHead.innerHTML = '';
-        tableBody.innerHTML = '';
-
-        if (!queryText) {
-            errorMessageDiv.style.display = 'block';
-            errorMessageDiv.textContent = 'Query cannot be empty.';
-            return;
-        }
-        try {
-            // Send query to backend
-            const response = await fetch('/query', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(queryText), // Send raw query as JSON payload
-            });
-            if (!response.ok) {
-                const error = await response.text();
-                throw new Error(error);
-            }
-            const result = await response.json();
-
-            // Check if the result is a message (object with a "message" field)
-            if (result.message) {
+            if (!queryText) {
                 errorMessageDiv.style.display = 'block';
-                errorMessageDiv.textContent = result.message; // Display the message
-                await fetchTableData(); // Restore original table data
+                errorMessageDiv.textContent = 'Query cannot be empty.';
                 return;
             }
-
-            // If the result is an array (assumed table rows), process it
-            if (!Array.isArray(result) || result.length <= 1) {
-                errorMessageDiv.style.display = 'block';
-                errorMessageDiv.textContent = 'Query returned no results.';
-                await fetchTableData(); // Restore original table data
-                return;
-            }
-
-            // Use first row as headers
-            const headers = result[0];
-            const headerRow = document.createElement('tr');
-            headers.forEach(header => {
-                const th = document.createElement('th');
-                th.textContent = header;
-                headerRow.appendChild(th);
-            });
-            tableHead.appendChild(headerRow);
-
-            // Generate table rows (skip first row)
-            result.slice(1).forEach(row => {
-                const rowElement = document.createElement('tr');
-                row.forEach(cellValue => {
-                    const td = document.createElement('td');
-                    td.textContent = cellValue;
-                    rowElement.appendChild(td);
+            try {
+                // Send query to backend
+                const response = await fetch('/query', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(queryText), // Send raw query as JSON payload
                 });
-                tableBody.appendChild(rowElement);
-            });
+                if (!response.ok) {
+                    const error = await response.text();
+                    throw new Error(error);
+                }
+                const result = await response.json();
 
-            // Show results
-            resultTable.style.display = 'table';
-            await fetchTableData();
-        } catch (error) {
-            errorMessageDiv.style.display = 'block';
-            errorMessageDiv.textContent = `Error: ${error.message}`;
-        }
+                // Check if the result is a message (object with a "message" field)
+                if (result.message) {
+                    errorMessageDiv.style.display = 'block';
+                    errorMessageDiv.textContent = result.message; // Display the message
+                    await fetchTableData(); // Restore original table data
+                    return;
+                }
+
+                // If the result is an array (assumed table rows), process it
+                if (!Array.isArray(result) || result.length <= 1) {
+                    errorMessageDiv.style.display = 'block';
+                    errorMessageDiv.textContent = 'Query returned no results.';
+                    await fetchTableData(); // Restore original table data
+                    return;
+                }
+
+                // Use first row as headers
+                const headers = result[0];
+                const headerRow = document.createElement('tr');
+                headers.forEach(header => {
+                    const th = document.createElement('th');
+                    th.textContent = header;
+                    headerRow.appendChild(th);
+                });
+                tableHead.appendChild(headerRow);
+
+                // Generate table rows (skip first row)
+                result.slice(1).forEach(row => {
+                    const rowElement = document.createElement('tr');
+                    row.forEach(cellValue => {
+                        const td = document.createElement('td');
+                        td.textContent = cellValue;
+                        rowElement.appendChild(td);
+                    });
+                    tableBody.appendChild(rowElement);
+                });
+
+                // Show results
+                resultTable.style.display = 'table';
+                await fetchTableData();
+            } catch (error) {
+                errorMessageDiv.style.display = 'block';
+                errorMessageDiv.textContent = `Error: ${error.message}`;
+            }
+        });
     });
 </script>
 </body>

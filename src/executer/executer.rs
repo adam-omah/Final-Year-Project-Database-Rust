@@ -5,11 +5,12 @@ use crate::tables::table::{create_table, delete_row, get_table_at_timestamp, get
 use crate::schema::schema;
 use crate::schema::schema::{drop_table, get_column_names_from_schema};
 use crate::{AppState};
-use actix_web::{post, web, HttpRequest, HttpResponse};
+use actix_web::{post, web, Error, HttpRequest, HttpResponse};
 use tracing::log::{debug, error, info};
 use uuid::Uuid;
 use regex::Regex;
 use serde_json::json;
+use crate::auth::auth::authenticate_request;
 use crate::tables::table::extract_literal_value;
 
 pub async fn execute_query(
@@ -607,21 +608,28 @@ pub async fn global_execute_query(ast_nodes: Vec<ASTNode>) -> anyhow::Result<Htt
 
 #[post("/query")]
 async fn execute_query_endpoint(
+    req: HttpRequest,
     query: web::Json<String>,
     data: web::Data<AppState>,
 ) -> HttpResponse { // Return plain HttpResponse
-    let sql_query = query.into_inner();
-    let query_bytes = sql_query.as_bytes();
-    let http_request = actix_web::test::TestRequest::default().to_http_request();
+    // Authenticate first
+    match authenticate_request(&req, &data).await {
+        Ok(_) => {
+            let sql_query = query.into_inner();
+            let query_bytes = sql_query.as_bytes();
+            let http_request = actix_web::test::TestRequest::default().to_http_request();
 
-    match sql_parser(query_bytes) {
-        Ok(ast_nodes) => {
-            // Successfully parsed query
-            execute_query(ast_nodes, data).await
+            match sql_parser(query_bytes) {
+                Ok(ast_nodes) => {
+                    // Successfully parsed query
+                    execute_query(ast_nodes, data).await
+                }
+                Err(err) => {
+                    // Handle parse failure with a unified JSON error response
+                    HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Failed to parse query: {}", err)}))
+                }
+            }
         }
-        Err(err) => {
-            // Handle parse failure with a unified JSON error response
-            HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Failed to parse query: {}", err)}))
-        }
+        Err(auth_error) => auth_error.into()
     }
 }

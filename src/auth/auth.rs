@@ -19,7 +19,7 @@ use base64::{engine::general_purpose, Engine as _};
 use tracing::log::{debug, error, info, warn};
 use crate::executer::executer::{ global_execute_query};
 use crate::query::parser::{sql_parser, ASTNode};
-use crate::tables::table::create_table;
+use crate::tables::table::{create_table, delete_row};
 // Import sql_parser
 
 const USERS_TABLE: &str = "users";
@@ -29,6 +29,7 @@ pub struct User {
     pub uuid: String,
     pub username: String,
     pub password_hash: String,
+    pub auth_group: String,
 }
 
 // Simulate fetching user from the database
@@ -48,14 +49,15 @@ async fn fetch_user_from_db(username: &str, state: &web::Data<AppState>) -> Opti
                                     // Check if we have at least 2 rows (header + data)
                                     if result.len() >= 2 {
                                         let row = &result[1]; // Get the data row
-                                        if row.len() >= 3 { // UUID, username, password_hash
+                                        if row.len() >= 4 { // UUID, username, password_hash, auth_group
                                             return Some(User {
                                                 uuid: row[0].clone(),
                                                 username: row[1].clone(),
                                                 password_hash: row[2].clone(),
+                                                auth_group: row[3].clone(),
                                             });
                                         } else {
-                                            eprintln!("Row doesn't have enough columns: expected at least 3, got {}", row.len());
+                                            eprintln!("Row doesn't have enough columns: expected at least 4, got {}", row.len());
                                         }
                                     } else {
                                         // This handles the case where user was not found (only header row)
@@ -143,16 +145,22 @@ async fn create_user(req: web::Json<CreateUserRequest>, state: web::Data<AppStat
         return Err(error::ErrorBadRequest("Username already exists"));
     }
 
-    // Create a new user
+    // Create a new user with "pending" auth_group
     let new_user = User {
         uuid: Uuid::new_v4().to_string(),
         username: create_request.username.clone(),
         password_hash: create_request.password.clone(), // Store a HASHED password in real life!
+        auth_group: "pending".to_string(),
     };
 
     // Insert the new user into the database
     let table_name = USERS_TABLE;
-    let row_data = vec![new_user.uuid.clone().to_string(), new_user.username.clone(), new_user.password_hash.clone()];
+    let row_data = vec![
+        new_user.uuid.clone().to_string(),
+        new_user.username.clone(),
+        new_user.password_hash.clone(),
+        new_user.auth_group.clone()
+    ];
 
     let result = crate::tables::table::insert_row(table_name, row_data, &state, None).await;
 
@@ -167,56 +175,126 @@ async fn create_user(req: web::Json<CreateUserRequest>, state: web::Data<AppStat
     }
 }
 
+
 // Handler for updating a user
 #[derive(Deserialize)]
 pub struct UpdateUserRequest {
     pub uuid: String,
     pub username: String,
     pub password: String,
+    pub auth_group: Option<String>, // Making it optional so existing code doesn't break
 }
 
-async fn update_user(req: web::Json<UpdateUserRequest>, state: web::Data<AppState>) -> Result<HttpResponse, Error> {
+
+async fn update_user(
+    req: web::Json<UpdateUserRequest>,
+    state: web::Data<AppState>,
+    authenticated_user: User // Get the authenticated user from request
+) -> Result<HttpResponse, Error> {
     let update_request = req.into_inner();
 
     // Ensure the user exists
-    if fetch_user_from_db(&update_request.username, &state).await.is_none() {
-        return Err(error::ErrorBadRequest("User Doesn't exists"));
-    }
+    let target_user = match fetch_user_from_db(&update_request.username, &state).await {
+        Some(user) => user,
+        None => return Err(error::ErrorBadRequest("User doesn't exist"))
+    };
 
     let mut updated_values: HashMap<String, String> = HashMap::new();
     updated_values.insert("username".to_string(), update_request.username.clone());
     updated_values.insert("password_hash".to_string(), update_request.password.clone());
 
-    let result = crate::tables::table::update_row(USERS_TABLE, &update_request.uuid, updated_values, &state).await;
+    // Check if auth_group is being updated
+    if let Some(new_auth_group) = &update_request.auth_group {
+        // Only users with "admin" auth_group can modify the auth_group field
+        if authenticated_user.auth_group != "admin" {
+            return Err(error::ErrorForbidden("Only administrators can change user groups"));
+        }
+
+        // Admin users can modify the auth_group
+        updated_values.insert("auth_group".to_string(), new_auth_group.clone());
+
+        // Log the auth group update
+        info!(
+            "User '{}' (auth_group: '{}') updating auth_group of user '{}' from '{}' to '{}'",
+            authenticated_user.username,
+            authenticated_user.auth_group,
+            target_user.username,
+            target_user.auth_group,
+            new_auth_group
+        );
+    } else if authenticated_user.auth_group != "admin" && authenticated_user.uuid != target_user.uuid {
+        // Non-admins can only update their own accounts
+        return Err(error::ErrorForbidden("You can only update your own account"));
+    }
+
+    // Perform the update
+    let result = crate::tables::table::update_row(
+        USERS_TABLE,
+        &update_request.uuid,
+        updated_values,
+        &state
+    ).await;
 
     match result {
         Ok(_) => {
             Ok(HttpResponse::Ok().json("User updated successfully"))
         }
         Err(e) => {
-            eprintln!("Failed to update user: {}", e);
+            error!("Failed to update user: {}", e);
             Err(error::ErrorInternalServerError("Failed to update user"))
         }
     }
 }
 
+
+
 // Handler for deleting a user
 #[derive(Deserialize)]
 pub struct DeleteUserRequest {
     pub id: String,
+    pub username: String,
 }
 
-async fn delete_user(req: web::Json<DeleteUserRequest>, state: web::Data<AppState>) -> Result<HttpResponse, Error> {
+async fn delete_user(
+    req: web::Json<DeleteUserRequest>,
+    state: web::Data<AppState>,
+    authenticated_user: User // Get the authenticated user from request
+) -> Result<HttpResponse, Error> {
     let delete_request = req.into_inner();
 
-    let result = crate::tables::table::delete_row(&USERS_TABLE.to_string(), &delete_request.id, &state).await;
+    // Fetch the user to be deleted
+    let target_user = match fetch_user_from_db(&delete_request.username, &state).await {
+        Some(user) => user,
+        None => return Err(error::ErrorBadRequest("User doesn't exist"))
+    };
+
+    // Authorization check: Only admins or the user themselves can delete the account
+    if authenticated_user.auth_group != "admin" && authenticated_user.uuid != target_user.uuid {
+        return Err(error::ErrorForbidden("You can only delete your own account or must be an administrator"));
+    }
+
+    // Proceed with user deletion
+    let result = delete_row(
+        &USERS_TABLE.to_string(),
+        &delete_request.id,
+        &state
+    ).await;
+
+    // Log the deletion
+    info!(
+        "User '{}' (auth_group: '{}') deleting user '{}' (uuid: '{}')",
+        authenticated_user.username,
+        authenticated_user.auth_group,
+        target_user.username,
+        target_user.uuid
+    );
 
     match result {
         Ok(_) => {
             Ok(HttpResponse::Ok().json("User deleted successfully"))
         }
         Err(e) => {
-            eprintln!("Failed to delete user: {}", e);
+            error!("Failed to delete user: {}", e);
             Err(error::ErrorInternalServerError("Failed to delete user"))
         }
     }
@@ -232,7 +310,7 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
             // Release the lock automatically at the end of this block
             drop(schema_locked);
 
-            // Define user table schema
+            // Define user table schema with auth_group column
             let user_table = Table {
                 name: USERS_TABLE.to_string(),
                 columns: vec![
@@ -243,6 +321,11 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
                     },
                     Column {
                         name: "password_hash".to_string(),
+                        data_type: DataType::String,
+                        rules: vec![],
+                    },
+                    Column {
+                        name: "auth_group".to_string(),
                         data_type: DataType::String,
                         rules: vec![],
                     }
@@ -278,9 +361,9 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
                                     Ok(json_response) => {
                                         if let Some(message) = json_response.get("message") {
                                             if message == "No matching rows found" {
-                                                // No admin user exists, create one
+                                                // No admin user exists, create one with admin auth_group
                                                 let insert_query = format!(
-                                                    "INSERT INTO {} (username, password_hash) VALUES ( \"admin\", \"admin\")",
+                                                    "INSERT INTO {} (username, password_hash, auth_group) VALUES ( \"admin\", \"admin\", \"admin\")",
                                                     crate::USERS_TABLE,
                                                 );
                                                 let insert_query_bytes = insert_query.as_bytes();
@@ -360,6 +443,7 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
         }
     }
 }
+
 
 impl FromRequest for User {
     type Error = actix_web::Error;
@@ -513,15 +597,24 @@ pub fn configure_auth_routes(cfg: &mut web::ServiceConfig) {
             .route(web::post().to(create_user)),
     );
 
+    // For routes that require authentication, we ensure User is extracted
     cfg.service(
         web::resource("/api/update-user")
-            .app_data(web::JsonConfig::default().limit(4096)) // Limit request body size
-            .route(web::post().to(update_user)),
+            .app_data(web::JsonConfig::default().limit(4096))
+            .route(web::post().to(|req: web::Json<UpdateUserRequest>,
+                                   state: web::Data<AppState>,
+                                   user: User| {
+                update_user(req, state, user)
+            })),
     );
 
     cfg.service(
         web::resource("/api/delete-user")
-            .app_data(web::JsonConfig::default().limit(4096)) // Limit request body size
-            .route(web::post().to(delete_user)),
+            .app_data(web::JsonConfig::default().limit(4096))
+            .route(web::post().to(|req: web::Json<DeleteUserRequest>,
+                                   state: web::Data<AppState>,
+                                   user: User| {
+                delete_user(req, state, user)
+            })),
     );
 }

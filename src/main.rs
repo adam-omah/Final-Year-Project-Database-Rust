@@ -238,6 +238,9 @@ async fn main() -> std::io::Result<()> {
             .configure(configure_auth_routes)
             // Static file serving
             .service(Files::new("/static", "./static").show_files_listing())
+            .route("/login-page", web::get().to(|| async {
+                actix_files::NamedFile::open("./static/html/login.html").unwrap()
+            }))
             // Route for `/tables` -> `tables.html`
             .route("/tables", web::get().to(|| async {
                 actix_files::NamedFile::open("./static/html/tables.html").unwrap()

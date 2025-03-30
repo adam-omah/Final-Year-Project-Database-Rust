@@ -29,9 +29,43 @@
 </div>
 
 <script>
-    // Query execution logic (unchanged)
-    document.getElementById('execute-query').addEventListener('click', async () => {
-        const queryText = document.getElementById('query-box').value.trim();
+    // user logged in check
+    document.addEventListener('DOMContentLoaded', () => {
+        const userInfo = localStorage.getItem('userInfo');
+
+        if (!userInfo) {
+            window.location.href = '/login-page';
+            return;
+        }
+
+
+        const originalFetch = window.fetch; // Store original fetch
+
+        window.fetch = async (url, options = {}) => {
+            const userInfo = JSON.parse(localStorage.getItem('userInfo'));
+            if (userInfo && userInfo.username && userInfo.password_hash) {
+                const encodedCredentials = btoa(`${userInfo.username}:${userInfo.password_hash}`);
+                options.headers = {
+                    ...options.headers,
+                    'Authorization': `Basic ${encodedCredentials}`
+                };
+            }
+
+            const response = await originalFetch(url, options); // Use originalFetch here
+
+            if (response.status === 401) {
+                localStorage.removeItem('userInfo');
+                window.location.href = '/login-page';
+                return null;
+            }
+
+            return response;
+        };
+
+
+
+        document.getElementById('execute-query').addEventListener('click', async () => {
+            const queryText = document.getElementById('query-box').value.trim();
         const errorMessageDiv = document.getElementById('error-message');
         const resultTable = document.getElementById('result-table');
         const tableHead = document.getElementById('table-head');
@@ -55,6 +89,12 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(queryText), // Send raw query as JSON payload
             });
+            if (response.status === 401) {
+                // Unauthorized, redirect to login
+                localStorage.removeItem('userInfo');
+                window.location.href = '/login-page';
+                return;
+            }
             if (!response.ok) {
                 const error = await response.text();
                 throw new Error(error);
@@ -102,6 +142,7 @@
             errorMessageDiv.style.display = 'block';
             errorMessageDiv.textContent = `Error: ${error.message}`;
         }
+    });
     });
 </script>
 </body>

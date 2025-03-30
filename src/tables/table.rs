@@ -1124,7 +1124,7 @@ async fn get_table_api(
 }
 
 
-    #[get("/api/tables/{table_name}/at/{timestamp}")]
+#[get("/api/tables/{table_name}/at/{timestamp}")]
 async fn get_table_at_timestamp_api(
     req: HttpRequest,
     path: web::Path<(String, String)>,

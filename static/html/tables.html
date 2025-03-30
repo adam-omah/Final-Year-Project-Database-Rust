@@ -23,31 +23,63 @@
 </div>
 
 <script>
-    // Fetch the list of tables
-    document.addEventListener('DOMContentLoaded', async () => {
-        const tablesList = document.getElementById('tables-list');
-        try {
-            const response = await fetch('/api/tables'); // Call API to fetch table names
-            if (!response.ok) {
-                throw new Error(`Failed to fetch tables: ${response.statusText}`);
-            }
-            const tables = await response.json();
+    // user logged in check
+    document.addEventListener('DOMContentLoaded', () => {
+        const userInfo = localStorage.getItem('userInfo');
 
-            // Dynamically create a list item and link for each table
-            tables.forEach(tableName => {
-                const listItem = document.createElement('li');
-                const link = document.createElement('a');
-                link.href = `/tables/${tableName}`;
-                link.textContent = tableName;
-                listItem.appendChild(link);
-                tablesList.appendChild(listItem);
-            });
-        } catch (error) {
-            const errorMessage = document.createElement('p');
-            errorMessage.textContent = `Error: ${error.message}`;
-            errorMessage.className = 'error';
-            tablesList.appendChild(errorMessage);
+        if (!userInfo) {
+            window.location.href = '/login-page';
+            return;
         }
+
+        const originalFetch = window.fetch; // Store original fetch
+        window.fetch = async (url, options = {}) => {
+            const userInfo = JSON.parse(localStorage.getItem('userInfo'));
+            if (userInfo && userInfo.username && userInfo.password_hash) {
+                const encodedCredentials = btoa(`${userInfo.username}:${userInfo.password_hash}`);
+                options.headers = {
+                    ...options.headers,
+                    'Authorization': `Basic ${encodedCredentials}`
+                };
+            }
+
+            const response = await originalFetch(url, options); // Use originalFetch here
+
+            if (response.status === 401) {
+                localStorage.removeItem('userInfo');
+                window.location.href = '/login-page';
+                return null;
+            }
+
+            return response;
+        };
+
+        const tablesList = document.getElementById('tables-list');
+
+        (async () => {
+            console.log("userInfo on tables.html:", localStorage.getItem('userInfo'));
+            try {
+                const response = await fetch('/api/tables');
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch tables: ${response.statusText}`);
+                }
+                const tables = await response.json();
+
+                tables.forEach(tableName => {
+                    const listItem = document.createElement('li');
+                    const link = document.createElement('a');
+                    link.href = `/tables/${tableName}`;
+                    link.textContent = tableName;
+                    listItem.appendChild(link);
+                    tablesList.appendChild(listItem);
+                });
+            } catch (error) {
+                const errorMessage = document.createElement('p');
+                errorMessage.textContent = `Error: ${error.message}`;
+                errorMessage.className = 'error'; // Add class for styling
+                tablesList.appendChild(errorMessage);
+            }
+        })();
     });
 </script>
 </body>

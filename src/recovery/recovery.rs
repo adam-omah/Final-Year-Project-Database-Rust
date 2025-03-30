@@ -5,13 +5,14 @@ use std::path::{Path, PathBuf};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
-use actix_web::{get, post, web, HttpResponse, Responder};
+use actix_web::{get, post, web, Error, HttpRequest, HttpResponse, Responder};
 use actix_web::cookie::time::format_description::well_known::iso8601::Config;
 use serde_json::{json, Value};
 use anyhow::{Result, Context, ensure};
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use tracing::log::{debug, error, info};
 use crate::AppState;
+use crate::auth::auth::authenticate_request;
 use crate::config::database_config::DatabaseConfig;
 use crate::tables::table::{get_table_data, recalculate_table, recalculate_table_global, refresh_all_tables};
 use crate::schema::schema;
@@ -643,39 +644,45 @@ pub fn configure_recovery_routes(cfg: &mut web::ServiceConfig) {
 
 #[get("/api/recovery/trigger")]
 pub async fn trigger_log_recovery(
+    req: HttpRequest,
     app_state: web::Data<AppState>  // Change from Mutex<AppState> to direct AppState
 ) -> impl Responder {
-    refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
-    // Perform log recovery
-    match run_log_recovery(&app_state.config).await {
+    match authenticate_request(&req, &app_state).await {
         Ok(_) => {
             refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
-            if let Err(e) = refresh_all_tables(&app_state).await {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "status": "error",
-                    "message": format!("Log recovery succeeded but table refresh failed: {}", e)
-                }));
+            // Perform log recovery
+            match run_log_recovery(&app_state.config).await {
+                Ok(_) => {
+                    refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
+                    if let Err(e) = refresh_all_tables(&app_state).await {
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "status": "error",
+                            "message": format!("Log recovery succeeded but table refresh failed: {}", e)
+                        }));
+                    }
+                    info!("Log recovery completed successfully");
+                    HttpResponse::Ok().json(serde_json::json!({
+                        "status": "success",
+                        "message": "Log recovery completed"
+                    }))
+                },
+                Err(e) => {
+                    refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
+                    if let Err(e) = refresh_all_tables(&app_state).await {
+                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                            "status": "error",
+                            "message": format!("Log recovery failed and table refresh failed: {}", e)
+                        }));
+                    }
+                    error!("Log recovery failed: {}", e);
+                    HttpResponse::InternalServerError().json(serde_json::json!({
+                        "status": "error",
+                        "message": format!("Log recovery failed: {}", e)
+                    }))
+                }
             }
-            info!("Log recovery completed successfully");
-            HttpResponse::Ok().json(serde_json::json!({
-                "status": "success",
-                "message": "Log recovery completed"
-            }))
-        },
-        Err(e) => {
-            refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
-            if let Err(e) = refresh_all_tables(&app_state).await {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
-                    "status": "error",
-                    "message": format!("Log recovery failed and table refresh failed: {}", e)
-                }));
-            }
-            error!("Log recovery failed: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
-                "status": "error",
-                "message": format!("Log recovery failed: {}", e)
-            }))
         }
+        Err(auth_error) => auth_error.into()
     }
 }
 

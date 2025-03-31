@@ -4,7 +4,7 @@ use crate::query::parser::{sql_parser, ASTNode, Expression, Identifier};
 use crate::tables::table::{create_table, delete_row, get_table_at_timestamp, get_table_data, insert_row, load_table_data_from_file, recalculate_table, update_row};
 use crate::schema::schema;
 use crate::schema::schema::{drop_table, get_column_names_from_schema};
-use crate::{AppState};
+use crate::{AppState, USERS_TABLE};
 use actix_web::{post, web, Error, HttpRequest, HttpResponse};
 use tracing::log::{debug, error, info};
 use uuid::Uuid;
@@ -604,6 +604,21 @@ pub async fn global_execute_query(ast_nodes: Vec<ASTNode>) -> anyhow::Result<Htt
     }
 }
 
+async fn check_for_reserved_words(sql_query: &str) -> Result<(), HttpResponse> {
+    let reserved_keyword = USERS_TABLE;
+
+    debug!("Checking for reserved keyword: {}", reserved_keyword);
+    if sql_query.to_lowercase().contains(reserved_keyword) {
+        // Reject the query with a clear error message
+        debug!("Query contains reserved keyword: {}", reserved_keyword);
+        return Err(HttpResponse::Forbidden().json(serde_json::json!({
+            "error": format!("Query contains reserved keyword: {}", reserved_keyword)
+        })));
+    }
+
+    Ok(())
+}
+
 
 
 #[post("/query")]
@@ -616,6 +631,7 @@ async fn execute_query_endpoint(
     match authenticate_request(&req, &data).await {
         Ok(_) => {
             let sql_query = query.into_inner();
+            check_for_reserved_words(&sql_query).await.unwrap();
             let query_bytes = sql_query.as_bytes();
             let http_request = actix_web::test::TestRequest::default().to_http_request();
 

@@ -70,3 +70,17 @@ th {
 .nav-button:hover {
     background: #0056b3;
 }
+
+.sidebar-logout-btn {
+    width: 100%;
+    padding: 10px;
+    margin-top: 20px;
+    background-color: #dc3545;
+    color: white;
+    border: none;
+    cursor: pointer;
+    border-radius: 5px;
+}
+.sidebar-logout-btn:hover {
+    background-color: #c82333;
+}

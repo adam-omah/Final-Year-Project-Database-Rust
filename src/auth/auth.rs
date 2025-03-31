@@ -2,7 +2,7 @@
 use actix_web::{web, error, HttpResponse, HttpRequest, Error, dev::{ServiceRequest, Service, Transform, ServiceResponse, forward_ready}, HttpMessage, body, FromRequest};
 use futures::future::{ready, LocalBoxFuture, Ready};
 use serde::{Serialize, Deserialize};
-use crate::{schema, AppState};
+use crate::{schema, AppState, USERS_TABLE};
 use crate::schema::schema::{DataType, Column, Table, ConstraintType, Rule, RuleAction};
 use std::collections::HashMap;
 use std::future::Future;
@@ -20,10 +20,8 @@ use tracing::log::{debug, error, info, warn};
 use crate::executer::executer::{ global_execute_query};
 use crate::query::parser::{sql_parser, ASTNode};
 use crate::replication::replication_nodes::load_nodes;
-use crate::tables::table::{create_table, delete_row};
+use crate::tables::table::{create_table, delete_row, recalculate_table_global, update_row};
 // Import sql_parser
-
-const USERS_TABLE: &str = "users";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct User {
@@ -34,23 +32,45 @@ pub struct User {
 }
 
 // Simulate fetching user from the database
-async fn fetch_user_from_db(username: &str, state: &web::Data<AppState>) -> Option<User> {
+async fn fetch_user_from_db(username: &str, state: &Data<AppState>) -> Option<User> {
+    // Debug logging for input
+    tracing::debug!("Attempting to fetch user with username: {}", username);
+
     let query = format!("SELECT * FROM {} WHERE username = {}", USERS_TABLE, username);
 
-    // Parse the query string into AST nodes
+    // Log the exact query being executed
+    tracing::debug!("Executing query: {}", query);
+
     match sql_parser(query.as_bytes()) {
         Ok(ast_nodes) => {
-            // Use global_execute_query instead of execute_query
+            tracing::debug!("SQL parsing successful");
+
             match global_execute_query(ast_nodes).await {
                 Ok(response) => {
+                    tracing::debug!("Query execution successful");
+
                     match body::to_bytes(response.into_body()).await {
                         Ok(body_bytes) => {
+                            // Log raw body bytes as a string
+                            let body_str = String::from_utf8_lossy(&body_bytes);
+                            tracing::debug!("Response body: {}", body_str);
+
                             match serde_json::from_slice::<Vec<Vec<String>>>(&body_bytes) {
                                 Ok(result) => {
-                                    // Check if we have at least 2 rows (header + data)
+                                    tracing::debug!("Deserialization successful. Total rows: {}", result.len());
+
                                     if result.len() >= 2 {
                                         let row = &result[1]; // Get the data row
+                                        tracing::debug!("Row data: {:?}", row);
+
+                                        // NEW: Check if the row is marked for removal
+                                        if row.iter().any(|cell| cell.contains("ROW_REMOVED")) {
+                                            tracing::warn!("User {} is marked as removed", username);
+                                            return None;
+                                        }
+
                                         if row.len() >= 4 { // UUID, username, password_hash, auth_group
+                                            tracing::debug!("User found: {}", row[1]);
                                             return Some(User {
                                                 uuid: row[0].clone(),
                                                 username: row[1].clone(),
@@ -58,34 +78,33 @@ async fn fetch_user_from_db(username: &str, state: &web::Data<AppState>) -> Opti
                                                 auth_group: row[3].clone(),
                                             });
                                         } else {
-                                            eprintln!("Row doesn't have enough columns: expected at least 4, got {}", row.len());
+                                            tracing::error!("Row doesn't have enough columns: expected at least 4, got {}", row.len());
                                         }
                                     } else {
-                                        // This handles the case where user was not found (only header row)
-                                        eprintln!("User not found: expected at least 2 rows, got {}", result.len());
+                                        tracing::debug!("No user found: expected at least 2 rows, got {}", result.len());
                                     }
                                     None
                                 },
                                 Err(e) => {
-                                    eprintln!("Failed to deserialize response body: {:?}", e);
+                                    tracing::error!("Failed to deserialize response body: {:?}", e);
                                     None
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("Failed to convert body to bytes: {:?}", e);
+                            tracing::error!("Failed to convert body to bytes: {:?}", e);
                             None
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Global query execution error: {}", e);
+                    tracing::error!("Global query execution error: {}", e);
                     None
                 }
             }
         }
         Err(e) => {
-            eprintln!("Parse error: {}", e);
+            tracing::error!("Parse error: {}", e);
             None
         }
     }
@@ -192,9 +211,10 @@ async fn update_user(
     state: web::Data<AppState>,
     authenticated_user: User // Get the authenticated user from request
 ) -> Result<HttpResponse, Error> {
+    debug!("Updating user");
     let update_request = req.into_inner();
 
-    // Ensure the user exists
+    // Ensure the user exist
     let target_user = match fetch_user_from_db(&update_request.username, &state).await {
         Some(user) => user,
         None => return Err(error::ErrorBadRequest("User doesn't exist"))
@@ -202,7 +222,12 @@ async fn update_user(
 
     let mut updated_values: HashMap<String, String> = HashMap::new();
     updated_values.insert("username".to_string(), update_request.username.clone());
-    updated_values.insert("password_hash".to_string(), update_request.password.clone());
+    if update_request.password != "" {
+        updated_values.insert("password_hash".to_string(), update_request.password.clone());
+    }else{
+        updated_values.insert("password_hash".to_string(), target_user.password_hash.clone());
+    }
+
 
     // Check if auth_group is being updated
     if let Some(new_auth_group) = &update_request.auth_group {
@@ -227,14 +252,26 @@ async fn update_user(
         // Non-admins can only update their own accounts
         return Err(error::ErrorForbidden("You can only update your own account"));
     }
+    let wrapped_row_id = format!("\"{}\"", update_request.uuid);
 
     // Perform the update
-    let result = crate::tables::table::update_row(
+    let result = update_row(
         USERS_TABLE,
-        &update_request.uuid,
+        &wrapped_row_id,
         updated_values,
         &state
     ).await;
+
+    actix_web::rt::spawn(async move {
+        match recalculate_table_global(USERS_TABLE).await {
+            Ok(_) => {
+                info!("Successfully recalculated table {}", USERS_TABLE);
+            },
+            Err(e) => {
+                error!("Failed to recalculate table {}: {}", USERS_TABLE, e);
+            }
+        }
+    });
 
     match result {
         Ok(_) => {
@@ -307,7 +344,7 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
     // Use a block scope to limit the lifetime of schema_locked
     {
         let schema_locked = app_state.schema.lock().unwrap();
-        if !schema_locked.tables.contains_key(&format!("{}_initial", crate::USERS_TABLE)) {
+        if !schema_locked.tables.contains_key(&format!("{}_initial", USERS_TABLE)) {
             // Release the lock automatically at the end of this block
             drop(schema_locked);
 
@@ -365,7 +402,7 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
                                                 // No admin user exists, create one with admin auth_group
                                                 let insert_query = format!(
                                                     "INSERT INTO {} (username, password_hash, auth_group) VALUES ( \"admin\", \"admin\", \"admin\")",
-                                                    crate::USERS_TABLE,
+                                                    USERS_TABLE,
                                                 );
                                                 let insert_query_bytes = insert_query.as_bytes();
 
@@ -453,6 +490,7 @@ impl FromRequest for User {
     fn from_request(req: &HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
         // Extract user from request extensions (set during basic auth)
         let user = req.extensions().get::<User>().cloned();
+        debug!("User extracted from request: {:?}", user);
 
         match user {
             Some(user) => ready(Ok(user)),
@@ -489,10 +527,9 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
                                         let parts: Vec<&str> = credentials_str.split(':').collect();
                                         if parts.len() == 2 {
                                             let (username, password) = (parts[0], parts[1]);
-
                                             match fetch_user_from_db(username, state).await {
                                                 Some(user) => {
-                                                    if user.password_hash == password {
+                                                    if user.password_hash == password  && user.auth_group != "pending" {
                                                         info!("User authenticated: {}", username);
                                                         req.extensions_mut().insert(user);
                                                         return Ok(()); // Successful user authentication
@@ -581,8 +618,18 @@ pub fn configure_auth_routes(cfg: &mut web::ServiceConfig) {
             .app_data(web::JsonConfig::default().limit(4096))
             .route(web::post().to(|req: web::Json<UpdateUserRequest>,
                                    state: web::Data<AppState>,
-                                   user: User| {
-                update_user(req, state, user)
+                                   req_http: HttpRequest| async move {
+                // Manually authenticate the request
+                match authenticate_request(&req_http, &state).await {
+                    Ok(_) => {
+                        // Extract user from request extensions after authentication
+                        match req_http.extensions().get::<User>() {
+                            Some(user) => update_user(req, state, user.clone()).await,
+                            None => Err(error::ErrorUnauthorized("Authentication failed"))
+                        }
+                    },
+                    Err(e) => Err(e)
+                }
             })),
     );
 
@@ -591,8 +638,18 @@ pub fn configure_auth_routes(cfg: &mut web::ServiceConfig) {
             .app_data(web::JsonConfig::default().limit(4096))
             .route(web::post().to(|req: web::Json<DeleteUserRequest>,
                                    state: web::Data<AppState>,
-                                   user: User| {
-                delete_user(req, state, user)
+                                   req_http: HttpRequest| async move {
+                // Manually authenticate the request
+                match authenticate_request(&req_http, &state).await {
+                    Ok(_) => {
+                        // Extract user from request extensions after authentication
+                        match req_http.extensions().get::<User>() {
+                            Some(user) => delete_user(req, state, user.clone()).await,
+                            None => Err(error::ErrorUnauthorized("Authentication failed"))
+                        }
+                    },
+                    Err(e) => Err(e)
+                }
             })),
     );
 }

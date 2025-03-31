@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Management</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+    <style>
+        .container {
+            background-color: white;
+            padding: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        table, th, td {
+            border: 1px solid #ddd;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+        }
+        .form-section {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+        }
+        input {
+            padding: 5px;
+            margin-right: 10px;
+        }
+        .error {
+            color: red;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+<div id="sidebar">
+    <div class="button-container">
+        <button onclick="location.href='/'" class="nav-button">Home</button>
+        <button onclick="location.href='/tables'" class="nav-button">Tables</button>
+        <button onclick="location.href='/replication'" class="nav-button active">Replication</button>
+        <button onclick="location.href='/admin'" class="nav-button active">Admin</button>
+    </div>
+    <div class="sidebar-footer">
+        <button id="logout-button" class="sidebar-logout-btn">
+            <i class="icon-logout"></i> Logout
+        </button>
+    </div>
+</div>
+<div class="container">
+    <h1>User Management</h1>
+
+    <!-- Error Message Display -->
+    <div id="error-message" class="error" style="display: none;"></div>
+
+    <!-- User Creation Form -->
+    <div class="form-section">
+        <input type="text" id="username" placeholder="Username">
+        <input type="password" id="password" placeholder="Password">
+        <select id="auth-group">
+            <option value="pending">Pending</option>
+            <option value="admin">Admin</option>
+            <option value="user">User</option>
+        </select>
+        <button id="create-user-btn">Create User</button>
+    </div>
+
+    <!-- User Edit Form (Hidden by default) -->
+    <div id="edit-form" class="form-section" style="display: none;">
+        <input type="hidden" id="edit-uuid">
+        <input type="text" id="edit-username" placeholder="Username">
+        <input type="password" id="edit-password" placeholder="New Password">
+        <select id="edit-auth-group">
+            <option value="pending">Pending</option>
+            <option value="admin">Admin</option>
+            <option value="user">User</option>
+        </select>
+        <button id="update-user-btn">Update User</button>
+        <button id="cancel-edit-btn">Cancel</button>
+    </div>
+
+    <!-- Users Table -->
+    <table id="users-table">
+        <thead>
+        <tr>
+            <th>UUID</th>
+            <th>Username</th>
+            <th>Auth Group</th>
+            <th>Actions</th>
+        </tr>
+        </thead>
+        <tbody id="users-table-body">
+        <!-- Users will be dynamically populated here -->
+        </tbody>
+    </table>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const userInfo = localStorage.getItem('userInfo');
+
+    if (!userInfo) {
+        window.location.href = '/login-page';
+        return;
+    }
+
+
+    const originalFetch = window.fetch; // Store original fetch
+
+    window.fetch = async (url, options = {}) => {
+        const userInfo = JSON.parse(localStorage.getItem('userInfo'));
+        if (userInfo && userInfo.username && userInfo.password_hash) {
+            const encodedCredentials = btoa(`${userInfo.username}:${userInfo.password_hash}`);
+            options.headers = {
+                ...options.headers,
+                'Authorization': `Basic ${encodedCredentials}`
+            };
+        }
+
+        const response = await originalFetch(url, options); // Use originalFetch here
+
+        // if (response.status === 401) {
+        //     localStorage.removeItem('userInfo');
+        //     window.location.href = '/login-page';
+        //     return null;
+        // }
+
+        return response;
+    };
+
+    const updateUserBtn = document.getElementById('update-user-btn');
+    const cancelEditBtn = document.getElementById('cancel-edit-btn');
+    const createUserBtn = document.getElementById('create-user-btn');
+    if (createUserBtn) {
+        createUserBtn.addEventListener('click', createUser);
+    }
+    if (updateUserBtn) {
+        updateUserBtn.addEventListener('click', updateUser);
+    }
+
+    if (cancelEditBtn) {
+        cancelEditBtn.addEventListener('click', cancelEdit);
+    }
+
+    function isValidPassword(password) {
+        // Reject if password consists of ONLY digits
+        const hasLetter = /[a-zA-Z]/.test(password);
+        const hasDigit = /\d/.test(password);
+
+        return hasLetter && hasDigit && isLongEnough;
+    }
+
+
+
+    // Function to fetch and display users
+    async function fetchUsers() {
+        try {
+            console.log('Attempting to fetch users...'); // Added logging
+            const response = await fetch('/api/tables/auth_users');
+
+            console.log('Response status:', response.status); // Log response status
+
+            if (!response.ok) {
+                throw new Error(`Failed to fetch users: ${response.statusText}`);
+            }
+
+            const userData = await response.json();
+
+            console.log('Received user data:', userData); // Log received data
+
+            const tableBody = document.getElementById('users-table-body');
+            tableBody.innerHTML = ''; // Clear existing rows
+
+            // Check if userData is an array and has elements
+            if (!Array.isArray(userData) || userData.length <= 1) {
+                console.warn('No user data to display');
+                return;
+            }
+
+            // Skip header row, start from index 1
+            for (let i = 1; i < userData.length; i++) {
+                const user = userData[i];
+
+                // Add a safety check for user array
+                if (!Array.isArray(user) || user.length < 4) {
+                    console.warn('Skipping invalid user data:', user);
+                    continue;
+                }
+
+                const row = document.createElement('tr');
+
+                // Create cells for UUID, Username, Auth Group
+                const cells = [
+                    user[0], // UUID
+                    user[1], // Username
+                    user[3]  // Auth Group
+                ];
+
+                cells.forEach(cellData => {
+                    const cell = document.createElement('td');
+                    cell.textContent = cellData;
+                    row.appendChild(cell);
+                });
+
+                // Actions cell
+                const actionsCell = document.createElement('td');
+                const editButton = document.createElement('button');
+                editButton.textContent = 'Edit';
+                editButton.onclick = () => prepareEditUser(user);
+
+                const deleteButton = document.createElement('button');
+                deleteButton.textContent = 'Delete';
+                deleteButton.style.backgroundColor = 'red';
+                deleteButton.onclick = () => deleteUser(user[0], user[1]);
+
+                actionsCell.appendChild(editButton);
+                actionsCell.appendChild(deleteButton);
+                row.appendChild(actionsCell);
+
+                tableBody.appendChild(row);
+            }
+        } catch (error) {
+            showError(error.message);
+        }
+    }
+
+    // Function to create a new user
+    function createUser() {
+        const username = document.getElementById('username').value;
+        const password = document.getElementById('password').value;
+        const authGroup = document.getElementById('auth-group').value;
+
+        if (!username || !password) {
+            showError('Username and password are required');
+            return;
+        }
+
+        if (!isValidPassword(password)) {
+            showError('Password should have numbers and letters');
+            return;
+        }
+
+        fetch('/create-user', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username, password, auth_group: authGroup})
+        })
+            .then(response => {
+                if (!response.ok) {
+                    return response.text().then(errorText => {
+                        throw new Error(errorText || 'Failed to create user');
+                    });
+                }
+                return response.json();
+            })
+            .then(() => {
+                // Clear form
+                document.getElementById('username').value = '';
+                document.getElementById('password').value = '';
+
+                // Refresh users table
+                fetchUsers();
+            })
+            .catch(error => {
+                console.error('Create user error:', error);
+                showError(error.message);
+            });
+    }
+
+
+    // Prepare user for editing
+    function prepareEditUser(user) {
+        const editForm = document.getElementById('edit-form');
+        editForm.style.display = 'flex';
+
+        document.getElementById('edit-uuid').value = user[0];
+        document.getElementById('edit-username').value = user[1];
+        document.getElementById('edit-auth-group').value = user[3];
+    }
+
+
+    // Update user
+    function updateUser() {
+        const uuid = document.getElementById('edit-uuid').value;
+        const username = document.getElementById('edit-username').value;
+        const password = document.getElementById('edit-password').value;
+        const authGroup = document.getElementById('edit-auth-group').value;
+
+        if (password && !isValidPassword(password)) {
+            showError('Password should have numbers and letters');
+            return;
+        }
+
+        try {
+            fetch('/api/update-user', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    uuid,
+                    username,
+                    password,
+                    auth_group: authGroup
+                })
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.text().then(errorText => {
+                            throw new Error(errorText || 'Failed to update user');
+                        });
+                    }
+                    return response.json();
+                })
+                .then(() => {
+                    // Clear edit form and hide it
+                    document.getElementById('edit-form').style.display = 'none';
+                    document.getElementById('edit-password').value = '';
+
+                    // Refresh users table
+                    fetchUsers();
+                })
+                .catch(error => {
+                    console.error('Update user error:', error);
+                    showError(error.message);
+                });
+        } catch (error) {
+            console.error('Unexpected error:', error);
+            showError(error.message);
+        }
+    }
+
+
+    // Cancel editing
+    function cancelEdit() {
+        document.getElementById('edit-form').style.display = 'none';
+        document.getElementById('edit-password').value = '';
+    }
+
+
+    // Delete user
+    async function deleteUser(uuid, username) {
+        if (!confirm(`Are you sure you want to delete user ${username}?`)) return;
+
+        try {
+            const response = await fetch('/api/delete-user', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    id: uuid,
+                    username: username
+                })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText || 'Failed to delete user');
+            }
+
+            // Refresh users table
+            await fetchUsers();
+        } catch (error) {
+            showError(error.message);
+        }
+    }
+
+    // Show error messages
+    function showError(message) {
+        const errorDiv = document.getElementById('error-message');
+        errorDiv.textContent = message;
+        errorDiv.style.display = 'block';
+        setTimeout(() => {
+            errorDiv.style.display = 'none';
+        }, 5000);
+    }
+
+    // Fetch users on page load
+    fetchUsers();
+});
+document.getElementById('logout-button')?.addEventListener('click', () => {
+    // Remove stored user credentials and information
+    localStorage.removeItem('userInfo');
+    localStorage.removeItem('credentials');
+
+    // Redirect to login page
+    window.location.href = '/login-page';
+});
+</script>
+</body>
+</html>

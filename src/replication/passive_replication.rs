@@ -6,16 +6,18 @@ use std::{fmt, thread};
 
 use actix_web::{web, HttpResponse, HttpRequest, http, post, get, Error as ActixError, rt};
 use actix_web::rt::spawn;
+use actix_web::web::Data;
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use chrono::Utc;
 use futures::TryFutureExt;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout, Instant};
 use tracing::log::{debug, error, info, trace, warn};
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
 use crate::replication::active_replication::{replicate_to_single_node, replicate_to_single_node_global, ReplicationRequest, ReplicationResponse};
 use crate::replication::replication_nodes::{load_nodes, ReplicationNode};
+use crate::replication::replication_sync_checker::try_perform_replication_sync;
 
 // Custom error type for replication
 #[derive(Debug,Clone)]
@@ -59,6 +61,8 @@ impl fmt::Display for ReplicationError {
 }
 
 impl Error for ReplicationError {}
+
+
 
 // Struct to represent a queued replication request
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -267,6 +271,7 @@ pub(crate) async fn try_replicate_request(
     }
 }
 
+
 // Actix route for initiating passive replication
 #[post("/api/passive-replication/queue")]
 pub async fn queue_passive_replication(
@@ -283,6 +288,83 @@ pub async fn queue_passive_replication(
         "status": "queued",
         "request_id": request_id
     })))
+}
+
+
+pub async fn replication_scheduler_loop(passive_replication_interval: i64, sync_interval: u64) {
+    debug!("DIAGNOSTIC: Starting inside the async Loop Function");
+    let passive_interval_duration = std::time::Duration::from_secs(passive_replication_interval as u64);
+    let sync_interval_duration = std::time::Duration::from_secs(sync_interval);
+    let mut passive_last_tick = Instant::now();
+    let mut sync_last_tick = Instant::now();
+    let failure_counts: Arc<Mutex<HashMap<Uuid, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    loop {
+        let now = Instant::now();
+        let passive_elapsed = now.duration_since(passive_last_tick);
+        let sync_elapsed = now.duration_since(sync_last_tick);
+
+        if sync_elapsed >= sync_interval_duration && sync_interval > 0 {
+            sync_last_tick = now;
+            info!("Running scheduled replication sync check at: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+            // Retrieve the global app state
+            if let Some(global_state) = AppState::global_state() {
+                // Clone the global app state for the task
+                let app_state = global_state.clone(); // Just clone the AppState
+                // Call the function using try pattern
+                match try_perform_replication_sync(Data::from(app_state)).await {
+                    Ok(_) => info!("Scheduled replication sync check completed successfully"),
+                    Err(e) => error!("Scheduled replication sync check failed: {}", e),
+                }
+            } else {
+                error!("Failed to retrieve global application state for scheduled sync check.");
+            }
+        } else if passive_elapsed >= passive_interval_duration && passive_replication_interval > 0 {
+            passive_last_tick = now;
+            info!("Running scheduled passive replication check at: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+
+            if let Some(global_state) = AppState::global_state() {
+                let app_state = global_state.clone();
+
+                // Clone requests instead of locking
+                let requests = {
+                    let mut queue = app_state.passive_replication_queue.lock().unwrap();
+                    queue.get_requests().clone() // Ensure PassiveReplicationQueue implements Clone
+                };
+
+                debug!("DIAGNOSTIC: Passive replication queue size: {}, contents: {:#?}", requests.len(), requests);
+                // Process requests without holding the lock
+                for mut request in requests {
+                    let app_state_clone = app_state.clone();
+                    let failure_counts_clone = Arc::clone(&failure_counts);
+                    let request_id = request.id;
+
+
+                    debug!("DIAGNOSTIC: Passive replication request: {:#?}", request);
+                    match try_replicate_request(&app_state_clone, &request).await {
+                        Ok(_) => {
+                            let mut counts = failure_counts_clone.lock().unwrap();
+                            counts.remove(&request_id);
+                        }
+                        Err(err) => {
+                            let mut counts = failure_counts_clone.lock().unwrap();
+                            let count = counts.entry(request_id).or_insert(0);
+                            *count += 1;
+
+                            error!("Replication failed for request {}: {}", request_id, err);
+
+                            if *count >= app_state_clone.config.replication.max_replication_attempts {
+                                error!("Request {} failed too many times. Marking as failed.", request_id);
+                            }
+                        }
+                    }
+                }
+            } else {
+                error!("Failed to retrieve global application state for passive replication check.");
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
 }
 
 // Optional: Route to check replication queue status

@@ -1,5 +1,3 @@
-version: '3'
-
 services:
   node1:
     image: final-year-project-database-rust

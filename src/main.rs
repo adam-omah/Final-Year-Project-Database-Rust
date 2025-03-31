@@ -1,16 +1,18 @@
 use actix_web::{ web, App, HttpRequest, HttpServer, Responder};
-use std::collections::{BTreeMap};
-use std::env;
+use std::collections::{BTreeMap, HashMap};
+use std::{env, thread};
+use std::error::Error;
 use std::fmt::Debug;
 use actix_files::Files;
 use std::io::{Result};
 use std::string::String;
-use std::sync::{Arc, Mutex, OnceLock};
-use actix_web::rt::spawn;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::thread::sleep;
 use actix_web::rt::time::Instant;
 use actix_web::web::Data;
 use chrono::Duration;
-use tracing::log::{error, info};
+use tokio::spawn;
+use tracing::log::{debug, error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
@@ -26,12 +28,9 @@ use crate::change_logging::change_logging::{configure_logging_routes, ChangeLogg
 use crate::query::parser::sql_parser;
 use crate::recovery::recovery::{configure_recovery_routes, trigger_log_recovery, trigger_specific_table_recovery, LogRecoveryManager};
 use crate::replication::active_replication::configure_replication_routes;
-use crate::replication::passive_replication::{
-    PassiveReplicationQueue,
-    PassiveReplicationService
-};
+use crate::replication::passive_replication::{try_replicate_request, PassiveReplicationQueue, PassiveReplicationService};
 use crate::replication::replication_nodes::configure_node_routes;
-use crate::replication::replication_sync_checker::{configure_sync_routes, perform_replication_sync, trigger_replication_sync};
+use crate::replication::replication_sync_checker::{configure_sync_routes, perform_replication_sync, trigger_replication_sync, try_perform_replication_sync};
 use crate::schema::schema::{Column, DataType};
 
 // Module Imports.
@@ -50,6 +49,7 @@ pub const DB_DIR: &str = "my_rust_db";
 pub const SCHEMA_FILE: &str = "schema.json";
 pub const TABLE_DIR: &str = "tables";
 pub const USERS_TABLE: &str = "users";
+pub const SECONDS_IN_MINUTE: u64 = 60;
 
 
 #[derive(Clone)]
@@ -84,47 +84,21 @@ impl AppState {
             passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         };
 
-        // Initialize passive replication service
-        app_state.start_passive_replication_service();
-
         app_state
     }
 
-    // Method to start passive replication service
-    fn start_passive_replication_service(&self) {
-        // Add more detailed logging
-        tracing::info!("Attempting to start passive replication service");
-
-        let config = self.config.clone();
-        let app_state = Arc::new(Mutex::new(self.clone()));
-
-        // Additional diagnostic print
-        println!("DIAGNOSTIC: Preparing to start passive replication service");
-        tracing::debug!("Cloned config: {:?}", config);
-
-        // Ensure we're not swallowing any potential errors
-        match self.passive_replication_service.lock() {
-            Ok(mut replication_service) => {
-                tracing::info!("Successfully acquired lock on passive replication service");
-
-                // Add a guard to prevent multiple starts
-                if !replication_service.is_running {
-                    println!("DIAGNOSTIC: Starting passive replication service");
-                    replication_service.start(
-                        app_state,
-                        config
-                    );
-                    tracing::info!("Passive replication service started");
-                } else {
-                    tracing::warn!("Passive replication service already running");
-                }
-            },
-            Err(e) => {
-                tracing::error!("Failed to acquire lock on passive replication service: {:?}", e);
-                println!("DIAGNOSTIC: Failed to acquire lock on passive replication service");
-            }
-        }
-    }
+    // // Method to start passive replication service
+    // fn start_passive_replication_service(&self) {
+    //     // Add more detailed logging
+    //     tracing::info!("Attempting to start passive replication service");
+    //
+    //     let config = self.config.clone();
+    //     let app_state = Arc::new(Mutex::new(self.clone()));
+    //
+    //     // Additional diagnostic print
+    //     println!("DIAGNOSTIC: Preparing to start passive replication service");
+    //     tracing::debug!("Cloned config: {:?}", config);
+    // }
 
     pub fn set_global_state(self) {
         // Initialize the global state if it's not already set
@@ -200,7 +174,6 @@ async fn main() -> std::io::Result<()> {
         panic!("Failed to initialize global application state");
     }
 
-
     // Create default admin user if not exists
     if let Err(e) = create_default_user(&app_state).await {
         error!("Failed to create default admin user: {}", e);
@@ -210,11 +183,10 @@ async fn main() -> std::io::Result<()> {
 
     if sync_interval > 0 {
         info!("Starting replication sync check scheduler with interval: {} minutes", sync_interval);
-        let app_state_clone = app_state.clone(); // Clone AppState for the task
-
         // Use actix_rt::spawn to start the scheduled task
         spawn(async move {
-            let interval_duration = std::time::Duration::from_secs(sync_interval * 60);
+            debug!("DIAGNOSTIC: Starting inside the async Sync Replication");
+            let interval_duration = std::time::Duration::from_secs(sync_interval * SECONDS_IN_MINUTE);
             let mut last_tick = Instant::now();
 
             loop {
@@ -229,10 +201,11 @@ async fn main() -> std::io::Result<()> {
                     if let Some(global_state) = AppState::global_state() {
                         // Clone the global app state for the task
                         let app_state = global_state.clone(); // Just clone the AppState
-                        // Call the function directly
-                        if let Err(e) = perform_replication_sync(Data::from(app_state)).await {
-                            error!("Scheduled replication sync check failed: {}", e);
-                        }
+                        // Call the function using try pattern
+                            match try_perform_replication_sync(Data::from(app_state)).await {
+                                Ok(_) => info!("Scheduled replication sync check completed successfully"),
+                                Err(e) => error!("Scheduled replication sync check failed: {}", e),
+                            }
                     } else {
                         error!("Failed to retrieve global application state for scheduled sync check.");
                     }
@@ -241,6 +214,73 @@ async fn main() -> std::io::Result<()> {
         });
     } else {
         info!("Replication sync check scheduler is disabled (sync_interval = 0)");
+    }
+
+
+
+    let passive_replication_interval = app_state.config.replication.retry_interval;
+
+    if passive_replication_interval > 0 {
+        info!("Starting passive replication scheduler with interval: {} seconds", passive_replication_interval);
+
+        spawn(async move {
+            debug!("DIAGNOSTIC: Starting inside the async Passive Replication");
+            let interval_duration = std::time::Duration::from_secs(passive_replication_interval as u64);
+            let mut last_tick = Instant::now();
+            let failure_counts: Arc<Mutex<HashMap<Uuid, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+
+            loop {
+                let now = Instant::now();
+                let elapsed = now.duration_since(last_tick);
+
+                if elapsed >= interval_duration {
+                    last_tick = now;
+                    info!("Running scheduled passive replication check at: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+
+                    if let Some(global_state) = AppState::global_state() {
+                        let app_state = global_state.clone();
+
+                        // Clone requests instead of locking
+                        let requests = {
+                            let mut queue = app_state.passive_replication_queue.lock().unwrap();
+                            queue.get_requests().clone() // Ensure PassiveReplicationQueue implements Clone
+                        };
+
+                        debug!("DIAGNOSTIC: Passive replication queue size: {}, contents: {:#?}", requests.len(), requests);
+                        // Process requests without holding the lock
+                        for mut request in requests {
+                            let app_state_clone = app_state.clone();
+                            let failure_counts_clone = Arc::clone(&failure_counts);
+                            let request_id = request.id;
+
+
+                            debug!("DIAGNOSTIC: Passive replication request: {:#?}", request);
+                            match try_replicate_request(&app_state_clone, &request).await {
+                                Ok(_) => {
+                                    let mut counts = failure_counts_clone.lock().unwrap();
+                                    counts.remove(&request_id);
+                                }
+                                Err(err) => {
+                                    let mut counts = failure_counts_clone.lock().unwrap();
+                                    let count = counts.entry(request_id).or_insert(0);
+                                    *count += 1;
+
+                                    error!("Replication failed for request {}: {}", request_id, err);
+
+                                    if *count >= app_state_clone.config.replication.max_replication_attempts {
+                                        error!("Request {} failed too many times. Marking as failed.", request_id);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        error!("Failed to retrieve global application state for passive replication check.");
+                    }
+                }
+            }
+        });
+    } else {
+        info!("Passive replication scheduler is disabled (passive_replication_interval = 0)");
     }
 
 
@@ -289,8 +329,6 @@ async fn main() -> std::io::Result<()> {
 
     Ok(())
 }
-
-
 
 
 /*

@@ -13,6 +13,7 @@ use tracing::log::{debug, error, info, trace, warn};
 use crate::{replication, AppState};
 use crate::change_logging::change_logging::ChangeLogEntry;
 use crate::replication::active_replication::{replicate_to_single_node, ReplicationRequest};
+use crate::replication::passive_replication::ReplicationError;
 use crate::replication::replication_nodes::{load_nodes, ReplicationMode, ReplicationNode};
 use crate::tables::table::get_table_data;
 
@@ -607,6 +608,110 @@ async fn replicate_changes_to_node(
             error!("Error during replication to node {}: {}", node.name, e);
             Err(e.into())
         }
+    }
+}
+
+
+pub async fn try_perform_replication_sync(app_state: web::Data<AppState>) -> Result<(), anyhow::Error> {
+    let config = &app_state.config;
+
+    // 1. Load Nodes Configuration
+    info!("Loading nodes config");
+    let nodes_config = load_nodes(config)?;
+    debug!("Nodes config loaded: {:?}", nodes_config);
+
+    if nodes_config.nodes.is_empty() {
+        warn!("No nodes configured, skipping replication sync check.");
+        return Ok(()); // Not an error, just nothing to do
+    }
+
+    // Create a reqwest client
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
+
+    // Create futures for sync checks on all nodes
+    let sync_futures = nodes_config.nodes.iter().map(|node| {
+        let client = client.clone();
+        let node_url = node.node_url.clone();
+
+        async move {
+            let addrs = match node.resolve_node_url() {
+                Ok(addrs) => {
+                    debug!("Resolved {} addresses for node {}", addrs.len(), node.name);
+                    addrs
+                },
+                Err(e) => {
+                    error!(
+                        "Failed to resolve address for node {}: {}",
+                        node.name,
+                        e
+                    );
+                    return Err(ReplicationError::NetworkError(e.to_string()));
+                }
+            };
+
+            let target_addr = match addrs.first() {
+                Some(addr) => {
+                    debug!("Selected target address: {}", addr);
+                    addr
+                },
+                None => {
+                    error!("No addresses resolved for node {}", node.name);
+                    return Err(ReplicationError::NetworkError(
+                        "Could not resolve any addresses".to_string()
+                    ));
+                }
+            };
+
+            let url = if node.node_url.starts_with("https") {
+                format!("https://{}/api/replication/sync", target_addr)
+            } else {
+                format!("http://{}/api/replication/sync", target_addr)
+            };
+
+            debug!("Attempting sync check on node: {}", url);
+
+            match client.post(&url).send().await {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        info!("Sync check successful for node: {}", url);
+                        Ok(())
+                    } else {
+                        error!("Sync check failed for node: {} - Status: {}", url, response.status());
+                        Err(ReplicationError::ReplicationFailure(format!("Sync check failed for {}: {}", url, response.status())))
+                    }
+                }
+                Err(e) => {
+                    error!("Network error during sync check on {}: {}", node_url, e);
+                    Err(ReplicationError::ReplicationFailure(format!("Network error on {}: {}", node_url, e)))
+                }
+            }
+        }
+    }).collect::<Vec<_>>();
+
+    // Wait for all sync checks to complete
+    let results = futures::future::join_all(sync_futures).await;
+
+    // Collect and handle any errors
+    let failed_nodes: Vec<_> = results
+        .into_iter()
+        .filter_map(|result| result.err())
+        .collect();
+
+    if failed_nodes.is_empty() {
+        info!("Sync check completed successfully on all nodes");
+        Ok(())
+    } else {
+        // Construct an error message with details about failed nodes
+        let error_details = failed_nodes
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        Err(anyhow::anyhow!("Replication sync failed: {}", error_details))
     }
 }
 

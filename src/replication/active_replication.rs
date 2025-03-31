@@ -18,7 +18,7 @@ use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 use crate::config::database_config::DatabaseConfig;
 use crate::tables::table::recalculate_table_global;
 use crate::recovery::recovery::LogRecoveryManager;
-use crate::replication::passive_replication::{get_replication_queue_status, queue_passive_replication};
+use crate::replication::passive_replication::{get_replication_queue_status, queue_passive_replication, ReplicationError};
 use crate::replication::replication_nodes::{load_nodes, validate_shared_secret, ReplicationMode, ReplicationNode};
 use crate::schema::schema::{refresh_schema, Schema};
 
@@ -213,6 +213,35 @@ pub async fn replicate_to_single_node(
         Err(format!("HTTP error: {}", response.status()).into())
     }
 }
+
+// In active_replication.rs
+pub async fn replicate_to_single_node_global(
+    node_url: String,  // Use owned String instead of reference
+    request: ReplicationRequest  // Pass by value
+) -> Result<(), ReplicationError> {
+    // Create client inside the function
+    let client = awc::Client::new();
+
+    // Serialize request
+    let serialized_request = serde_json::to_string(&request)
+        .map_err(|e| ReplicationError::SerializationError(e.to_string()))?;
+
+    // Perform replication
+    match client
+        .post(format!("{}/api/replication/push", node_url))
+        .send_body(serialized_request)
+        .await
+    {
+        Ok(response) if response.status().is_success() => Ok(()),
+        Ok(response) => Err(ReplicationError::NetworkError(
+            format!("HTTP error: {}", response.status())
+        )),
+        Err(e) => Err(ReplicationError::NetworkError(e.to_string()))
+    }
+}
+
+
+
 
 fn fallback_to_passive_replication(
     state: Arc<AppState>,

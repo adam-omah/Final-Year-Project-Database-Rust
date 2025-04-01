@@ -412,7 +412,7 @@ mod app_tests {
         let raw_query = r#"CREATE TABLE test_table (col1 Int, col2 String)"#;
         let req = test::TestRequest::post()
             .uri("/query")
-            .set_json(&raw_query)
+            .set_json(raw_query)
             .to_request();
 
         // Execute the request and evaluate the response
@@ -515,7 +515,7 @@ mod app_tests {
         let raw_query = r#"CREATE TABLE test_table col1 Int, col2 String"#;
         let req = test::TestRequest::post()
             .uri("/query")
-            .set_json(&raw_query)
+            .set_json(raw_query)
             .to_request();
 
         let resp = test::call_service(&app, req).await;

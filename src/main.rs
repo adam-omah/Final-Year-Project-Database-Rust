@@ -53,6 +53,8 @@ pub struct AppState {
 }
 
 impl AppState {
+    // function only used for testing as such warning needs to be surpressed.
+    #[allow(dead_code)]
     pub(crate) fn test() -> AppState {
         let test_schema = Arc::new(Mutex::new(Schema::default()));
         let test_config = DatabaseConfig {
@@ -179,45 +181,7 @@ async fn main() -> std::io::Result<()> {
         error!("Failed to create default admin user: {}", e);
     }
 
-    // // // Sync Checking loop, IT CANNOT BE EXTRACTED, HAVE TRIED SEVERAL TIMES IT BREAKS THE CODE.
-    // let sync_interval = app_state.config.replication.sync_interval;
-    //
-    // if sync_interval > 0 {
-    //     info!("Starting replication sync check scheduler with interval: {} minutes", sync_interval);
-    //     // Use spawn to start the scheduled task
-    //     spawn(async move {
-    //         debug!("DIAGNOSTIC: Starting inside the async Sync Replication");
-    //         let interval_duration = std::time::Duration::from_secs(sync_interval * SECONDS_IN_MINUTE);
-    //         let mut last_tick = Instant::now();
-    //
-    //         loop {
-    //             let now = Instant::now();
-    //             let elapsed = now.duration_since(last_tick);
-    //
-    //             if elapsed >= interval_duration {
-    //                 last_tick = now;
-    //                 info!("Running scheduled replication sync check at: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
-    //
-    //                 // Retrieve the global app state
-    //                 if let Some(global_state) = AppState::global_state() {
-    //                     // Clone the global app state for the task
-    //                     let app_state = global_state.clone(); // Just clone the AppState
-    //                     // Call the function using try pattern
-    //                         match try_perform_replication_sync(Data::from(app_state)).await {
-    //                             Ok(_) => info!("Scheduled replication sync check completed successfully"),
-    //                             Err(e) => error!("Scheduled replication sync check failed: {}", e),
-    //                         }
-    //                 } else {
-    //                     error!("Failed to retrieve global application state for scheduled sync check.");
-    //                 }
-    //             }
-    //         }
-    //     });
-    // } else {
-    //     info!("Replication sync check scheduler is disabled (sync_interval = 0)");
-    // }
-
-    // Passive replication loop, IT CANNOT BE EXTRACTED, HAVE TRIED SEVERAL TIMES IT BREAKS THE CODE.
+    // Passive replication & Sync loop
     let passive_replication_interval = app_state.config.replication.retry_interval;
     let sync_interval = app_state.config.replication.sync_interval;
 

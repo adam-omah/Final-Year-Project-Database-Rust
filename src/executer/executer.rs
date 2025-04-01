@@ -602,11 +602,8 @@ pub async fn global_execute_query(ast_nodes: Vec<ASTNode>) -> anyhow::Result<Htt
 
 async fn check_for_reserved_words(sql_query: &str) -> Result<(), HttpResponse> {
     let reserved_keyword = USERS_TABLE;
-
-    debug!("Checking for reserved keyword: {}", reserved_keyword);
     if sql_query.to_lowercase().contains(reserved_keyword) {
         // Reject the query with a clear error message
-        debug!("Query contains reserved keyword: {}", reserved_keyword);
         return Err(HttpResponse::Forbidden().json(serde_json::json!({
             "error": format!("Query contains reserved keyword: {}", reserved_keyword)
         })));
@@ -622,22 +619,31 @@ async fn execute_query_endpoint(
     req: HttpRequest,
     query: web::Json<String>,
     data: web::Data<AppState>,
-) -> HttpResponse { // Return plain HttpResponse
+) -> HttpResponse {
     // Authenticate first
     match authenticate_request(&req, &data).await {
         Ok(_) => {
             let sql_query = query.into_inner();
-            check_for_reserved_words(&sql_query).await.unwrap();
-            let query_bytes = sql_query.as_bytes();
 
-            match sql_parser(query_bytes) {
-                Ok(ast_nodes) => {
-                    // Successfully parsed query
-                    execute_query(ast_nodes, data).await
+            // Handle the result of checking reserved words
+            match check_for_reserved_words(&sql_query).await {
+                Ok(_) => {
+                    let query_bytes = sql_query.as_bytes();
+
+                    match sql_parser(query_bytes) {
+                        Ok(ast_nodes) => {
+                            // Successfully parsed query
+                            execute_query(ast_nodes, data).await
+                        }
+                        Err(err) => {
+                            // Handle parse failure with a unified JSON error response
+                            HttpResponse::BadRequest().json(json!({"error": format!("Failed to parse query: {}", err)}))
+                        }
+                    }
                 }
-                Err(err) => {
-                    // Handle parse failure with a unified JSON error response
-                    HttpResponse::BadRequest().json(serde_json::json!({"error": format!("Failed to parse query: {}", err)}))
+                Err(reserved_words_error) => {
+                    // Return an error response if reserved words are found
+                    HttpResponse::BadRequest().json(json!({"error": format!("Reserved words found: {:?}", reserved_words_error)}))
                 }
             }
         }

@@ -7,7 +7,7 @@ use crate::schema::schema::{drop_table, get_column_names_from_schema};
 use crate::{AppState, USERS_TABLE};
 use actix_web::{post, web, HttpRequest, HttpResponse};
 use anyhow::anyhow;
-use tracing::log::{debug, error, info, warn};
+use tracing::log::{error, info, warn};
 use uuid::Uuid;
 use regex::Regex;
 use serde_json::{json, Value};

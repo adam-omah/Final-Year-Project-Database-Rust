@@ -7,7 +7,7 @@ use actix_web::{get, post, web, HttpResponse, Responder};
 use actix_web::web::Data;
 use awc::Client;
 use serde::{Deserialize, Serialize};
-use tracing::log::{debug, error, info};
+use tracing::log::{error, info};
 use uuid::Uuid;
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;

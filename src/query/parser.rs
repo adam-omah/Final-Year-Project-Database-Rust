@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::str;
-use tracing::log::{debug, info};
+use tracing::log::info;
 use uuid::Uuid;
 use crate::schema::schema::{DataType};
 

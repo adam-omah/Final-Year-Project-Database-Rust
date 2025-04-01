@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use actix_web::web::Data;
-use tracing::log::{debug, error, info, warn};
+use tracing::log::{error, info, warn};
 use crate::schema::schema::{check_column_rules, is_valid_data_type, DataType};
 use chrono::{ NaiveDateTime, Utc};
 use uuid::Uuid;

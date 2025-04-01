@@ -8,7 +8,7 @@ use base64::Engine;
 use base64::engine::general_purpose;
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::log::{debug, error, info, trace, warn};
+use tracing::log::{error, info, trace, warn};
 use crate::{ AppState};
 use crate::change_logging::change_logging::ChangeLogEntry;
 use crate::replication::active_replication::{replicate_to_single_node, ReplicationRequest};

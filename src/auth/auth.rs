@@ -1,6 +1,5 @@
 // auth.rs
-use actix_web::{web, error, HttpResponse, HttpRequest, Error, HttpMessage, body, FromRequest};
-use futures::future::{ready, Ready};
+use actix_web::{web, error, HttpResponse, HttpRequest, Error, HttpMessage, body};
 use serde::{Serialize, Deserialize};
 use crate::{ AppState, USERS_TABLE};
 use crate::schema::schema::{DataType, Column, Table};
@@ -9,7 +8,7 @@ use actix_web::error::{ ErrorUnauthorized};
 use actix_web::web::Data;
 use uuid::Uuid;
 use base64::{engine::general_purpose, Engine as _};
-use tracing::log::{debug, error, info, warn};
+use tracing::log::{error, info, warn};
 use crate::executer::executer::{ global_execute_query};
 use crate::query::parser::{sql_parser};
 use crate::replication::replication_nodes::load_nodes;

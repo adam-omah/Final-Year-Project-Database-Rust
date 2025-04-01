@@ -8,7 +8,7 @@ use actix_web::web::Data;
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use tokio::time::{ Instant};
-use tracing::log::{debug, error, info, warn};
+use tracing::log::{error, info, warn};
 use crate::AppState;
 use crate::replication::active_replication::{ ReplicationRequest };
 use crate::replication::replication_nodes::{load_nodes};

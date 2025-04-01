@@ -499,19 +499,20 @@ fn parse_update_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
 }
 
 fn match_token_to_identifier(value_token: &String) -> Identifier {
-    let identifier = if value_token.starts_with('"') && value_token.ends_with('"') {
+    
+    if value_token.starts_with('"') && value_token.ends_with('"') {
         // Handle string literals
         Identifier::Literal(
             value_token[1..value_token.len() - 1].to_string(),
             Some(DataType::String),
         )
-    } else if is_numeric_literal(&value_token) {
+    } else if is_numeric_literal(value_token) {
         // Handle numbers
         Identifier::Literal(value_token.parse().unwrap(), Some(DataType::Int)) // Adjust to `Float` if decimals are needed
-    } else if is_uuid(&value_token) {
+    } else if is_uuid(value_token) {
         // Handle UUIDs
         Identifier::Literal(value_token.to_string(), Some(DataType::UUID))
-    } else if is_datetime(&value_token) {
+    } else if is_datetime(value_token) {
         // Handle datetime literals
         Identifier::Literal(value_token.to_string(), Some(DataType::DateTime))
     } else if value_token.chars().any(|c| c.is_alphabetic()) {
@@ -520,8 +521,7 @@ fn match_token_to_identifier(value_token: &String) -> Identifier {
     } else {
         // Treat anything else as a generic literal
         Identifier::Literal(value_token.parse().unwrap(), None)
-    };
-    identifier
+    }
 }
 
 fn parse_drop_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {

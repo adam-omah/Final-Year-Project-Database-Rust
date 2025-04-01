@@ -523,7 +523,7 @@ pub fn evaluate_where_clause(
 fn match_values(row: &[String], column_names_upper: &Vec<String>, value: &Identifier) -> Option<String> {
     let left_value = match value {
         Identifier::Name(name) => {
-            let index_result = find_column_index(&column_names_upper, &name.to_uppercase());
+            let index_result = find_column_index(column_names_upper, &name.to_uppercase());
             index_result.and_then(|index| row.get(index).map(String::from))
         }
         Identifier::Literal(lit, _) => Some(lit.clone()),

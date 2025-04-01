@@ -52,6 +52,32 @@ pub struct AppState {
     pub passive_replication_queue: Arc<Mutex<PassiveReplicationQueue>>,
 }
 
+impl AppState {
+    pub(crate) fn test() -> AppState {
+        let test_schema = Arc::new(Mutex::new(Schema::default()));
+        let test_config = DatabaseConfig {
+            db_dir: "test_run_db".into(),
+            table_dir: "test_run_tables".into(),
+            log_dir: "test_run_logs".into(),
+            log_file: "test_run_log_file".into(),
+            ..DatabaseConfig::default()
+        };
+
+        let test_cache = Arc::new(Mutex::new(BTreeMap::new()));
+        let test_change_logger = ChangeLogger::new("test_run_logs".into(), "test_run_log_file".into());
+        let test_log_recovery_manager = LogRecoveryManager::new(test_config.clone());
+
+        AppState {
+            schema: test_schema,
+            config: test_config,
+            cache: test_cache,
+            change_logger: test_change_logger,
+            log_recovery_manager: test_log_recovery_manager,
+            passive_replication_queue: Arc::new(Mutex::new(PassiveReplicationQueue::default())),
+        }
+    }
+}
+
 static GLOBAL_APP_STATE: OnceLock<Arc<Mutex<Option<AppState>>>> = OnceLock::new();
 
 
@@ -63,16 +89,16 @@ impl AppState {
         change_logger: ChangeLogger,
         log_recovery_manager: LogRecoveryManager,
     ) -> Self {
-        let app_state = Self {
+        
+
+        Self {
             schema: schema.clone(),
             config: config.clone(),
             cache,
             change_logger,
             log_recovery_manager,
             passive_replication_queue: Arc::new(Mutex::new(PassiveReplicationQueue::default())),
-        };
-
-        app_state
+        }
     }
     pub fn set_global_state(self) {
         // Initialize the global state if it's not already set

@@ -269,7 +269,7 @@ async fn replication_push(
     }
 
     // Validate shared secret
-    let validation_result = validate_shared_secret(&*payload, &app_state.clone());
+    let validation_result = validate_shared_secret(&payload, &app_state.clone());
     if let Err(error_message) = validation_result {
         return Ok(HttpResponse::Unauthorized().json(ReplicationResponse {
             status: "unauthorized".into(),

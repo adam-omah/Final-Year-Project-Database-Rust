@@ -47,7 +47,7 @@ pub async fn execute_query(
                 return handle_delete(table, &data, &where_clause).await;
             }
             ASTNode::Drop { table } => {
-                return handle_drop(&table, &data).await;
+                return handle_drop(table, &data).await;
             }
             _ => {
                 return HttpResponse::BadRequest().json(serde_json::json!({"error": "Unsupported AST Node type"}));
@@ -90,7 +90,7 @@ async fn handle_select(
                 // If a WHERE clause exists, filter the rows based on it
                 if let Some(condition) = &where_clause {
                     info!("Evaluating WHERE clause: {:?}", condition);
-                    let column_names = match get_column_names_from_schema(&data, table_name) {
+                    let column_names = match get_column_names_from_schema(data, table_name) {
                         Ok(names) => {
                             debug!("Column names from schema: {:?}", names);
                             names
@@ -102,12 +102,8 @@ async fn handle_select(
                     };
 
                     let original_count = table_data.len();
-                    table_data = table_data
-                        .into_iter()
-                        .filter(|row| row == &column_names ||
-                            evaluate_where_clause(condition, row, &column_names)
-                        )
-                        .collect();
+                    table_data.retain(|row| row == &column_names ||
+                            evaluate_where_clause(condition, row, &column_names));
                     debug!("After WHERE filtering: {} rows (from {})", table_data.len(), original_count);
                     debug!("WHERE clause result: {:?}", table_data);
                 }
@@ -216,7 +212,7 @@ async fn handle_drop(
     };
 
     // Attempt to drop the table
-    match drop_table(&mut schema, table_name, &data) {
+    match drop_table(&mut schema, table_name, data) {
         Ok(_) => {
             HttpResponse::Ok().json(json!({
                 "message": format!("Table {} dropped successfully", table_name)
@@ -308,7 +304,7 @@ async fn handle_delete(
                 }
                 // Call `delete_row` for each filtered row
                 for row in &rows_to_delete {
-                    if let Some(row_id) = row.get(0) {
+                    if let Some(row_id) = row.first() {
                         if let Err(e) = delete_row(table_name, row_id, data).await {
                             return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error deleting row: {}", e)}));
                         }
@@ -376,7 +372,7 @@ async fn handle_update(
 
                 // Apply updates to the filtered rows
                 for row in &filtered_rows {
-                    if let Some(row_id) = row.get(0) {
+                    if let Some(row_id) = row.first() {
                         if let Err(e) = update_row(table_name, row_id, updated_values.clone(), data).await {
                             return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error updating row: {}", e)}));
                         }
@@ -534,7 +530,7 @@ pub fn evaluate_where_clause(
                 ">=" => left_val >= right_val,
                 "<=" => left_val <= right_val,
                 "LIKE" => {
-                    return evaluate_like_condition(&left_val, &right_val);
+                    evaluate_like_condition(&left_val, &right_val)
                 }
                 _ => false, // Unsupported
             }

@@ -86,7 +86,7 @@ impl ChangeLogger {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.log_directory.join(&self.log_file))?;
+            .open(self.log_directory.join(&self.log_file))?;
 
         writeln!(file, "{}", log_entry_json)?;
 
@@ -97,7 +97,7 @@ impl ChangeLogger {
     pub fn read_recent_logs(&self, limit: usize) -> IoResult<Vec<ChangeLogEntry>> {
         use std::io::{BufRead, BufReader};
 
-        let file = File::open(&self.log_directory.join(&self.log_file))?;
+        let file = File::open(self.log_directory.join(&self.log_file))?;
         let reader = BufReader::new(file);
 
         let mut all_logs: Vec<ChangeLogEntry> = Vec::new();
@@ -120,7 +120,7 @@ impl ChangeLogger {
     pub fn read_logs_for_table(&self, table_name: &str, limit: usize) -> IoResult<Vec<ChangeLogEntry>> {
         use std::io::{BufRead, BufReader};
 
-        let file = File::open(&self.log_directory.join(&self.log_file))?;
+        let file = File::open(self.log_directory.join(&self.log_file))?;
         let reader = BufReader::new(file);
 
         let mut filtered_logs: Vec<ChangeLogEntry> = Vec::new();

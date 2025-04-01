@@ -150,10 +150,7 @@ pub async fn register_node(
     app_state: web::Data<AppState>
 ) -> impl Responder {
     let config = app_state.config.clone();
-    let mut nodes_config = match load_nodes(&config) {
-        Ok(config) => config,
-        Err(_) => NodesConfig::default(),
-    };
+    let mut nodes_config = load_nodes(&config).unwrap_or_default();
 
     // Additional validation could be added here
     let new_node = ReplicationNode {
@@ -286,10 +283,7 @@ pub async fn cross_node_register(
     match register_with_target_node(&req.source_node,app_state).await {
         Ok(target_node_response) => {
             // 3. Save local node configuration
-            let mut nodes_config = match load_nodes(&config) {
-                Ok(config) => config,
-                Err(_) => NodesConfig::default(),
-            };
+            let mut nodes_config = load_nodes(&config).unwrap_or_default();
 
             // 4. Add or update the node in local configuration
             update_local_node_configuration(

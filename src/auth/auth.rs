@@ -209,7 +209,7 @@ async fn update_user(
 
     let mut updated_values: HashMap<String, String> = HashMap::new();
     updated_values.insert("username".to_string(), update_request.username.clone());
-    if update_request.password != "" {
+    if !update_request.password.is_empty() {
         updated_values.insert("password_hash".to_string(), update_request.password.clone());
     }else{
         updated_values.insert("password_hash".to_string(), target_user.password_hash.clone());

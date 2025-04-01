@@ -59,10 +59,10 @@ pub fn is_numeric_literal(s: &str) -> bool {
 
 pub fn is_datetime(s: &str) -> bool {
     // Try parsing common datetime formats
-    if let Ok(_) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+    if chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").is_ok() {
         return true; // Example: "2025-02-16 20:10:00"
     }
-    if let Ok(_) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+    if chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").is_ok() {
         return true; // Example: "2025-02-16T20:10:00"
     }
     false // Return false if format not matched
@@ -214,16 +214,16 @@ fn parse_select_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
             }
 
             // Return the SELECT AST node
-            return Ok(ASTNode::Select {
+            Ok(ASTNode::Select {
                 columns,
                 table,
                 timestamp,
-            });
+            })
         } else {
-            return Err("Expected table name after 'FROM'".to_string());
+            Err("Expected table name after 'FROM'".to_string())
         }
     } else {
-        return Err("Missing 'FROM' clause in SELECT statement".to_string());
+        Err("Missing 'FROM' clause in SELECT statement".to_string())
     }
 }
 
@@ -329,18 +329,18 @@ fn parse_create_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
                 // Ensure the closing parenthesis exists
                 if *index < tokens.len() && tokens[*index] == ")" {
                     *index += 1;
-                    return Ok(ASTNode::Create { table, columns });
+                    Ok(ASTNode::Create { table, columns })
                 } else {
-                    return Err("Expected ')' after column definitions.".into());
+                    Err("Expected ')' after column definitions.".into())
                 }
             } else {
-                return Err("Expected '(' after table name.".into());
+                Err("Expected '(' after table name.".into())
             }
         } else {
-            return Err("Expected table name after 'CREATE TABLE'.".into());
+            Err("Expected table name after 'CREATE TABLE'.".into())
         }
     } else {
-        return Err("Expected 'TABLE' after 'CREATE'.".into());
+        Err("Expected 'TABLE' after 'CREATE'.".into())
     }
 }
 
@@ -356,13 +356,13 @@ fn parse_delete_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
                 Ok(ASTNode::Delete { table })
             } else {
                 // Return an error if there is no WHERE clause
-                return Err("DELETE statement must include a WHERE clause".to_string());
+                Err("DELETE statement must include a WHERE clause".to_string())
             }
         } else {
-            return Err("Expected table name after DELETE FROM".to_string());
+            Err("Expected table name after DELETE FROM".to_string())
         }
     } else {
-        return Err("Expected FROM after DELETE".to_string());
+        Err("Expected FROM after DELETE".to_string())
     }
 }
 
@@ -433,25 +433,25 @@ fn parse_insert_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
                     }
                     if *index < tokens.len() && tokens[*index] == ")" {
                         *index += 1;
-                        return Ok(ASTNode::Insert {
+                        Ok(ASTNode::Insert {
                             table,
                             columns,
                             values,
-                        });
+                        })
                     } else {
-                        return Err("Expected ')' after values list".to_string());
+                        Err("Expected ')' after values list".to_string())
                     }
                 } else {
-                    return Err("Expected '(' after VALUES".to_string());
+                    Err("Expected '(' after VALUES".to_string())
                 }
             } else {
-                return Err("Expected VALUES after table name".to_string());
+                Err("Expected VALUES after table name".to_string())
             }
         } else {
-            return Err("Expected table name after INSERT INTO".to_string());
+            Err("Expected table name after INSERT INTO".to_string())
         }
     } else {
-        return Err("Expected INTO after INSERT".to_string());
+        Err("Expected INTO after INSERT".to_string())
     }
 }
 
@@ -534,7 +534,7 @@ fn parse_update_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
 
     // Enforce the presence of the "WHERE" clause
     if *index >= tokens.len() || tokens[*index] != "WHERE" {
-        return Err("Expected 'WHERE' clause after 'SET' in 'UPDATE'".to_string());
+        Err("Expected 'WHERE' clause after 'SET' in 'UPDATE'".to_string())
     } else {
         Ok(ASTNode::Update { table, values }) // Finalize and return the ASTNode::Update
     }

@@ -114,13 +114,10 @@ pub fn map_string_to_rule(rule_str: &str) -> Option<Rule> {
         _ => None,
     };
 
-    match constraint_type {
-        Some(c_type) => Some(Rule {
+    constraint_type.map(|c_type| Rule {
             constraint_type: c_type,
             action: action.unwrap_or(RuleAction::Reject), // Default to Reject as fallback
-        }),
-        None => None, // Constraint type not recognized
-    }
+        })
 }
 
 // Helper function to parse a CHECK constraint into an `Expression`
@@ -326,11 +323,11 @@ pub fn drop_table(
 
     // Remove table files if they exist
     if initial_file_path.exists() {
-        std::fs::remove_file(&initial_file_path)?;
+        std::fs::remove_file(initial_file_path)?;
     }
 
     if updates_file_path.exists() {
-        std::fs::remove_file(&updates_file_path)?;
+        std::fs::remove_file(updates_file_path)?;
     }
 
     // Log the table drop operation
@@ -485,7 +482,7 @@ pub fn global_drop_table_from_cache(table_name: String) -> anyhow::Result<()> {
 
     // Use the existing drop_table_from_cache function
     drop_table_from_cache(
-        &*table_name,
+        &table_name,
         &web::Data::from(global_state)
     ).map_err(|e| anyhow::anyhow!(e))?;
 
@@ -622,7 +619,7 @@ mod schema_tests {
             ],
         };
 
-        create_table(&mut schema, table, &config, &change_logger, Default::default())?;
+        create_table(&mut schema, table, &config, &change_logger, &Data::new(AppState::test()))?;
 
         // Verify both initial and updates tables were created
         assert!(schema.tables.contains_key("test_table_initial"));

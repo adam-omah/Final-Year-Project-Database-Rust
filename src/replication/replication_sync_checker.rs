@@ -80,7 +80,7 @@ async fn fetch_current_table_data(config: &crate::DatabaseConfig) -> Result<Tabl
     debug!("Fetching current table data with config: {:?}", config);
 
     info!("Reading table directory: {}", &config.db_dir.join(&config.table_dir).display());
-    for entry in std::fs::read_dir(&config.db_dir.join(&config.table_dir))? {
+    for entry in std::fs::read_dir(config.db_dir.join(&config.table_dir))? {
         let entry = entry?;
         let file_name = entry.file_name().into_string().unwrap();
         debug!("Processing file: {}", file_name);
@@ -176,7 +176,7 @@ async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig
 
                         // Convert the TableResponse (Vec<Vec<String>>) to Vec<Value>
                         let table_values: Vec<Value> = body.0.into_iter()
-                            .map(|row| serde_json::Value::Array(row))
+                            .map(serde_json::Value::Array)
                             .collect();
 
                         table_data.insert(table_name.clone(), table_values);
@@ -214,7 +214,7 @@ async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig
 
                             // Convert the TableResponse (Vec<Vec<String>>) to Vec<Value>
                             let table_values: Vec<Value> = body.0.into_iter()
-                                .map(|row| serde_json::Value::Array(row))
+                                .map(serde_json::Value::Array)
                                 .collect();
 
                             table_data.insert(table_name.clone(), table_values);
@@ -605,7 +605,7 @@ async fn replicate_changes_to_node(
         }
         Err(e) => {
             error!("Error during replication to node {}: {}", node.name, e);
-            Err(e.into())
+            Err(e)
         }
     }
 }

@@ -39,7 +39,7 @@ impl LogRecoveryManager {
                 .to_string();
 
             table_logs.entry(table_name)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(entry);
         }
 
@@ -55,7 +55,7 @@ impl LogRecoveryManager {
     fn read_log_entries(&self) -> Result<Vec<serde_json::Value>> {
         let file_location = self.config.log_dir.join(&self.config.log_file);
         info!("Reading log file: {}", file_location.display());
-        let file = File::open(&self.config.log_dir.join(&self.config.log_file))
+        let file = File::open(self.config.log_dir.join(&self.config.log_file))
             .context("Failed to open log file")?;
 
         let reader = BufReader::new(file);
@@ -184,7 +184,7 @@ impl LogRecoveryManager {
         }));
 
         // Check if table exists, and if it does, compare the schema
-        if !schema["tables"].get(initial_table_name).is_some() {
+        if schema["tables"].get(initial_table_name).is_none() {
             schema["tables"][initial_table_name] = json!({
                 "name": initial_table_name,
                 "columns": columns
@@ -200,7 +200,7 @@ impl LogRecoveryManager {
         }
 
         // Do the same for updates table
-        if !schema["tables"].get(updates_table_name).is_some() {
+        if schema["tables"].get(updates_table_name).is_none() {
             schema["tables"][updates_table_name] = json!({
                 "name": updates_table_name,
                 "columns": columns
@@ -225,7 +225,7 @@ impl LogRecoveryManager {
                 fs::create_dir_all(parent_dir)?;
             }
             // Open existing table file or create a new one if it doesn't exist
-            OpenOptions::new().create(true).write(true).open(&table_path)?;
+            OpenOptions::new().create(true).write(true).open(table_path)?;
             info!("Verified existence of table file at {:?}", &table_path);
         }
         Ok(())
@@ -544,8 +544,8 @@ impl LogRecoveryManager {
             .into_iter()
             .filter(|log| {
                 if let Some(log_time) = self.get_log_timestamp(log) {
-                    let is_after = log_time > since_timestamp;
-                    is_after
+                    
+                    log_time > since_timestamp
                 } else {
                     false
                 }
@@ -569,7 +569,7 @@ impl LogRecoveryManager {
                 .and_then(|tn| tn.as_str())
                 .map(|s| s.to_string()) {
                 table_logs.entry(table_name)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(log);
             }
         }
@@ -581,9 +581,9 @@ impl LogRecoveryManager {
             let mut sorted_logs = logs;
             sorted_logs.sort_by(|a, b| {
                 let a_time = self.get_log_timestamp(a)
-                    .unwrap_or_else(|| Utc::now());
+                    .unwrap_or_else(Utc::now);
                 let b_time = self.get_log_timestamp(b)
-                    .unwrap_or_else(|| Utc::now());
+                    .unwrap_or_else(Utc::now);
                 a_time.cmp(&b_time)
             });
             // Process table recovery

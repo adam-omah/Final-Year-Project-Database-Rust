@@ -31,7 +31,7 @@ impl StaleReplicationQueue {
     pub fn add_stale_request(&mut self, node_name: String, request: QueuedReplicationRequest) {
         self.queue
             .entry(node_name)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(request);
     }
 

@@ -20,7 +20,7 @@ use crate::replication::active_replication::replicate_change_to_nodes;
 
 pub fn create_table(table: &Table, state: &Data<AppState>) -> Result<()> {
     let mut schema = state.schema.lock().unwrap();
-    schema_create_table(&mut schema, table.clone(), &state.config, &state.change_logger, &state)?;
+    schema_create_table(&mut schema, table.clone(), &state.config, &state.change_logger, state)?;
     drop(schema);
     Ok(())
 }
@@ -207,7 +207,7 @@ pub async fn update_row(
 
     let row_index = current_data
         .iter()
-        .position(|row| row.get(0) == Some(uuid)) // Assume UUID is always in the first column
+        .position(|row| row.first() == Some(uuid)) // Assume UUID is always in the first column
         .ok_or_else(|| {
             Error::new(ErrorKind::NotFound, format!("Row with UUID '{}' not found", uuid))
         })?;
@@ -551,7 +551,7 @@ async fn validate_and_process_row(
         }
 
         // Validate and transform the value based on column rules
-        let validated_value = check_column_rules(column, &value, table_name, &state, Some(&row_uuid))
+        let validated_value = check_column_rules(column, &value, table_name, state, Some(&row_uuid))
             .await?
             .ok_or_else(|| {
                 std::io::Error::new(
@@ -593,9 +593,9 @@ pub(crate) fn extract_literal_value(identifier: &Identifier) -> String {
 fn quote_if_needed(value: &str) -> String {
     // Check if the value is a valid number
     if value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok() {
-        return value.to_string(); // Return as-is for numbers
+        value.to_string()// Return as-is for numbers
     }else {
-        return format!("\"{}\"", value.replace('\"', "\\\"")); // Escape quotes within the value
+        format!("\"{}\"", value.replace('\"', "\\\""))// Escape quotes within the value
     }
 }
 
@@ -680,7 +680,7 @@ pub async fn recalculate_row(
     let initial_row = initial_data
         .into_iter()
         .find(|row| {
-            if let Some(id) = row.get(0) {
+            if let Some(id) = row.first() {
                 let cleaned_id = id.trim_matches('"');
                 return cleaned_id == cleaned_uuid;
             }
@@ -703,7 +703,7 @@ pub async fn recalculate_row(
     let relevant_updates: Vec<Vec<String>> = updates_data
         .into_iter()
         .filter(|row| {
-            if let Some(id) = row.get(0) {
+            if let Some(id) = row.first() {
                 let cleaned_id = id.trim_matches('"');
                 return cleaned_id == cleaned_uuid;
             }
@@ -726,7 +726,7 @@ pub async fn recalculate_row(
     let mut cache = state.cache.lock().unwrap();
     if let Some(cached_table) = cache.get_mut(table_name) {
         for row in cached_table.iter_mut() {
-            if let Some(id) = row.get(0) {
+            if let Some(id) = row.first() {
                 let cleaned_id = id.trim_matches('"');
                 if cleaned_id == cleaned_uuid {
                     *row = final_row;
@@ -856,12 +856,9 @@ pub async fn refresh_all_tables(state: &web::Data<AppState>) -> Result<()> {
         ))?;
 
         schema.tables.keys()
-            .filter_map(|key| {
-                key.replace("_initial", "")
+            .filter(|&key| key.replace("_initial", "")
                     .replace("_updates", "")
-                    .is_empty()
-                    .then(|| key.replace("_initial", ""))
-            })
+                    .is_empty()).map(|key| key.replace("_initial", ""))
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect()

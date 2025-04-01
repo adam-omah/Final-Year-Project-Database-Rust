@@ -41,9 +41,6 @@ async fn fetch_user_from_db(username: &str) -> Option<User> {
 
                     match body::to_bytes(response.into_body()).await {
                         Ok(body_bytes) => {
-                            // Log raw body bytes as a string
-                            let body_str = String::from_utf8_lossy(&body_bytes);
-
                             match serde_json::from_slice::<Vec<Vec<String>>>(&body_bytes) {
                                 Ok(result) => {
                                     if result.len() >= 2 {

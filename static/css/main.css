@@ -84,3 +84,19 @@ th {
 .sidebar-logout-btn:hover {
     background-color: #c82333;
 }
+.database-query-guide {
+    display: none;
+    margin-top: 10px;
+}
+#toggle-guide-btn {
+    margin-bottom: 10px;
+}
+pre {
+    background-color: #f4f4f4;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 10px;
+    overflow-x: auto;
+}
+code { color: #333; }
+

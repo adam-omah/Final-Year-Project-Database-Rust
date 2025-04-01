@@ -58,7 +58,7 @@ pub async fn perform_replication_sync(app_state: web::Data<AppState>) -> Result<
         info!("Starting replication sync check with node: {}", other_node.name);
         // 2. Fetch Data from Each Node
         let current_node_data = fetch_current_table_data(config).await?; // Fetch data from the current instance
-        let other_node_data = fetch_table_data(other_node, config).await?; // Fetch data from the other node
+        let other_node_data = fetch_table_data(other_node).await?; // Fetch data from the other node
 
         // 3. Compare Data and Logs, and potentially reverse direction
         compare_node_data_and_replicate(Arc::from(app_state.get_ref().clone()), other_node, &current_node_data, &other_node_data).await?;
@@ -105,7 +105,7 @@ async fn fetch_current_table_data(config: &crate::DatabaseConfig) -> Result<Tabl
     Ok(table_data)
 }
 
-async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig) -> Result<TableData, Box<dyn std::error::Error>> {
+async fn fetch_table_data(node: &ReplicationNode) -> Result<TableData, Box<dyn std::error::Error>> {
     let mut table_data: TableData = HashMap::new();
 
     let client = awc::Client::default();

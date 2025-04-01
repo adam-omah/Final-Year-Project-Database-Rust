@@ -91,8 +91,6 @@ async fn handle_select(
                             return HttpResponse::InternalServerError().json(json!({"error": format!("Error fetching column names: {}", e)}));
                         }
                     };
-
-                    let original_count = table_data.len();
                     table_data.retain(|row| row == &column_names ||
                             evaluate_where_clause(condition, row, &column_names));
                 }

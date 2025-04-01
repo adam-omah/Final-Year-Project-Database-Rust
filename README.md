@@ -42,12 +42,12 @@ docker run --name my-rust-database-8081 -p 8081:8081 -e PORT=8081 final-year-pro
 
 Tagging for docker hub:
 ``
-docker tag final-year-project-database-rust adam0mah/rust-db-engine:test-ver-1
+docker tag final-year-project-database-rust adam0mah/rust-db-engine:latest
 ``
 
 Pushing to docker Hub:
 ``
-docker push adam0mah/rust-db-engine:test-ver-1
+docker push adam0mah/rust-db-engine:latest
 ``
 
 Testing replication with docker compose:

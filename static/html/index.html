@@ -24,6 +24,7 @@
 <div id="content">
     <textarea id="query-box" placeholder="Enter SQL query here..."></textarea>
     <button id="execute-query">Execute</button>
+    <button id="toggle-guide-btn">Show Query Guide</button>
     <div id="output-section">
         <!-- Area to display results -->
         <div id="error-message" class="error" style="display: none;"></div>
@@ -31,6 +32,58 @@
             <thead id="table-head"></thead>
             <tbody id="table-body"></tbody>
         </table>
+    </div>
+    <div class="database-query-guide">
+        <h2>Database Query Language Syntax Examples</h2>
+        <h3>SELECT Statements</h3>
+        <pre>
+            <code>
+                SELECT * FROM &lt;table_name&gt;
+                SELECT &lt;column1&gt;, &lt;column2&gt;, &lt;column3&gt; FROM &lt;table_name&gt;
+                SELECT * FROM &lt;table_name&gt; AT &lt;timestamp&gt;
+                SELECT * FROM &lt;table_name&gt; WHERE &lt;column&gt; LIKE '&lt;pattern&gt;'
+                SELECT * FROM &lt;table_name&gt; WHERE &lt;column&gt; = &lt;value&gt;
+                SELECT &lt;column1&gt;, &lt;column2&gt; FROM &lt;table_name&gt; WHERE &lt;column&gt; &gt;= &lt;value&gt;
+            </code>
+        </pre>
+
+        <h3>CREATE TABLE Statements</h3>
+        <pre>
+            <code>
+                CREATE TABLE &lt;table_name&gt; (
+                    &lt;column1&gt; &lt;data_type&gt;,
+                    &lt;column2&gt; &lt;data_type&gt; UNIQUE,
+                    &lt;column3&gt; &lt;data_type&gt; NOT NULL CHECK (&lt;condition&gt;)
+                )
+            </code>
+        </pre>
+
+        <h3>INSERT Statements</h3>
+        <pre>
+            <code>
+                INSERT INTO &lt;table_name&gt; (&lt;column1&gt;, &lt;column2&gt;) VALUES ("&lt;value1&gt;", &lt;value2&gt;)
+                INSERT INTO &lt;table_name&gt; VALUES (&lt;value1&gt;, "&lt;value2&gt;")
+            </code>
+        </pre>
+
+        <h3>UPDATE Statements</h3>
+        <pre>
+            <code>
+                UPDATE &lt;table_name&gt;
+                SET &lt;column&gt; = &lt;new_value&gt;
+                WHERE uuid = "&lt;specific_uuid&gt;"
+            </code>
+        </pre>
+
+        <h3>DELETE Statements</h3>
+        <pre>
+            <code>
+                DELETE FROM &lt;table_name&gt;
+                WHERE uuid = "&lt;specific_uuid&gt;"
+            </code>
+        </pre>
+        <h3>Table Management</h3>
+        <pre><code>DROP TABLE &lt;table_name&gt;</code></pre>
     </div>
 </div>
 
@@ -158,6 +211,18 @@
 
         // Redirect to login page
         window.location.href = '/login-page';
+    });
+
+    const guideContainer = document.querySelector('.database-query-guide');
+    const toggleButton = document.getElementById('toggle-guide-btn');
+    toggleButton.addEventListener('click', () => {
+        if (guideContainer.style.display === 'none' || guideContainer.style.display === '') {
+            guideContainer.style.display = 'block';
+            toggleButton.textContent = 'Hide Query Guide';
+        } else {
+            guideContainer.style.display = 'none';
+            toggleButton.textContent = 'Show Query Guide';
+        }
     });
 </script>
 </body>

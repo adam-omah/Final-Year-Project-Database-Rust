@@ -28,7 +28,7 @@ pub fn create_table(table: &Table, state: &Data<AppState>) -> Result<()> {
 pub async fn insert_row(
     table_name: &str,
     row_data: Vec<String>,
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
     column_names: Option<Vec<String>>, // Add column names here
 ) -> Result<String> {
     // Acquire schema lock and clone it
@@ -43,8 +43,8 @@ pub async fn insert_row(
         .tables
         .get(&initial_table_name)
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
+            Error::new(
+                ErrorKind::NotFound,
                 format!("Table '{}' does not exist in schema", initial_table_name),
             )
         })?;
@@ -60,8 +60,8 @@ pub async fn insert_row(
         // Check if all provided column names exist in the schema
         for column_name in provided_column_names {
             if !valid_column_names.contains(column_name) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
                     format!("Invalid column name: '{}'", column_name)
                 ));
             }
@@ -144,7 +144,7 @@ pub async fn insert_row(
     let mut writer = open_table_file_append_only(&initial_table_path)?;
     write_newline_if_needed(&initial_table_path)?;
     writeln!(writer, "{}", serialized_row)
-        .map_err(|e| std::io::Error::new(e.kind(), format!("Failed to write initial values  to file: {}", e)))?;
+        .map_err(|e| Error::new(e.kind(), format!("Failed to write initial values  to file: {}", e)))?;
 
     let cache_row = validated_row
         .iter()
@@ -154,8 +154,8 @@ pub async fn insert_row(
     add_row_to_cache(table_name, cache_row.clone(), state).await?;
 
     let uuid_to_return = row_data_map.get("UUID")
-        .ok_or_else(|| std::io::Error::new(
-            std::io::ErrorKind::Other,
+        .ok_or_else(|| Error::new(
+            ErrorKind::Other,
             "UUID not found in row data".to_string()
         ))?
         .clone();
@@ -184,7 +184,7 @@ pub async fn update_row(
     table_name: &str,
     uuid: &String,
     mut updated_values: HashMap<String, String>,
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
 ) -> Result<()> {
     let updates_table_name = format!("{}_updates", table_name);
     let updates_table_path = Path::new(state.config.db_dir.as_path())
@@ -195,8 +195,8 @@ pub async fn update_row(
     let schema = state.schema.lock().unwrap().clone();
     let initial_table_name = format!("{}_initial", table_name);
     let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
+        Error::new(
+            ErrorKind::NotFound,
             format!("Table '{}' does not exist in schema", initial_table_name),
         )
     })?;
@@ -282,7 +282,7 @@ pub async fn update_row(
 }
 
 
-pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<AppState>) -> Result<()> {
+pub async fn delete_row(table_name: &String, uuid: &String, state: &Data<AppState>) -> Result<()> {
     // Construct the `_updates` table name and path
     let updates_table_name = format!("{}_updates", table_name);
     let updates_table_path = Path::new(&state.config.db_dir)
@@ -294,7 +294,7 @@ pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<Ap
     let initial_table_name = format!("{}_initial", table_name);
     let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
         Error::new(
-            std::io::ErrorKind::NotFound,
+            ErrorKind::NotFound,
             format!("Table '{}' does not exist in schema", initial_table_name),
         )
     })?;
@@ -363,7 +363,7 @@ pub async fn delete_row(table_name: &String, uuid: &String, state: &web::Data<Ap
 
 // Utility function for extracting data from `_initial` and `_updates` tables, applying updates, and returning combined data.
 pub fn get_table_data(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     table_name: &str,
 ) -> BoxFuture<Result<Vec<Vec<String>>>> {
     Box::pin(async move {
@@ -491,7 +491,7 @@ pub fn load_table_data_from_file(table_path: &Path) -> Result<Vec<Vec<String>>> 
 async fn validate_and_process_row(
     table_name: &str,
     mut row_data: HashMap<String, String>,
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
 ) -> Result<Vec<String>> {
     // Lock the schema just long enough to get a clone of it
     let schema = {
@@ -502,8 +502,8 @@ async fn validate_and_process_row(
     // Validate that the table exists in the cloned schema
     let initial_table_name = format!("{}_initial", table_name);
     let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
+        Error::new(
+            ErrorKind::NotFound,
             format!("Table '{}' does not exist in schema", initial_table_name),
         )
     })?;
@@ -512,8 +512,8 @@ async fn validate_and_process_row(
     let row_uuid = row_data
         .get("UUID")
         .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+            Error::new(
+                ErrorKind::InvalidInput,
                 "Missing UUID column in row data",
             )
         })?
@@ -541,8 +541,8 @@ async fn validate_and_process_row(
 
         // Validate the data type
         if !is_valid_data_type(&column.data_type, &value) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
                 format!(
                     "Invalid data type for column '{}'. Expected: {:?}, Found: {}",
                     column_name, column.data_type, value
@@ -554,8 +554,8 @@ async fn validate_and_process_row(
         let validated_value = check_column_rules(column, &value, table_name, state, Some(&row_uuid))
             .await?
             .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
+                Error::new(
+                    ErrorKind::InvalidInput,
                     format!("Constraint violation for column '{}'", column_name),
                 )
             })?;
@@ -571,7 +571,7 @@ fn open_table_file_append_only(table_path: &Path) -> Result<std::fs::File> {
         .append(true)
         .open(table_path)
         .map_err(|e| {
-            std::io::Error::new(
+            Error::new(
                 e.kind(),
                 format!(
                     "Failed to open table file '{}' in append-only mode: {}",
@@ -625,7 +625,7 @@ fn write_newline_if_needed(table_path: &Path) -> Result<()> {
 async fn add_row_to_cache(
     table_name: &str,
     new_row: Vec<String>,
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
 ) -> Result<()> {
     let mut cache = state.cache.lock().unwrap();
 
@@ -648,7 +648,7 @@ async fn add_row_to_cache(
 }
 
 pub async fn recalculate_row(
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
     table_name: &str,
     uuid: &str,
 ) -> Result<()> {
@@ -687,7 +687,7 @@ pub async fn recalculate_row(
             false
         })
         .ok_or_else(|| {
-            std::io::Error::new(
+            Error::new(
                 ErrorKind::NotFound,
                 format!("Row with UUID '{}' not found in the initial table", uuid),
             )
@@ -741,7 +741,7 @@ pub async fn recalculate_row(
 }
 
 pub async fn recalculate_table(
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
     table_name: &str,
     initial_table_data: Vec<Vec<String>>,
 ) -> Result<()> {
@@ -774,13 +774,13 @@ pub async fn recalculate_table(
 pub async fn recalculate_table_global(table_name: &str) -> Result<()> {
     // Get the global app state
     let global_state = AppState::global_state()
-        .ok_or_else(|| std::io::Error::new(
-            std::io::ErrorKind::NotFound,
+        .ok_or_else(|| Error::new(
+            ErrorKind::NotFound,
             "Global application state not initialized"
         ))?;
 
     // Create a web::Data wrapper to match the expected parameter type
-    let state = web::Data::new((*global_state).clone());
+    let state = Data::new((*global_state).clone());
 
     // Get the initial table path
     let initial_table_name = format!("{}_initial", table_name);
@@ -847,11 +847,11 @@ fn parse_timestamp_from_row(row: &Vec<String>) -> Option<NaiveDateTime> {
         .and_then(|timestamp| NaiveDateTime::parse_from_str(timestamp.trim_matches('"'), "%Y-%m-%d %H:%M:%S").ok())
 }
 
-pub async fn refresh_all_tables(state: &web::Data<AppState>) -> Result<()> {
+pub async fn refresh_all_tables(state: &Data<AppState>) -> Result<()> {
     // Get the list of unique table base names from the schema
     let table_names: Vec<String> = {
-        let schema = state.schema.lock().map_err(|_| std::io::Error::new(
-            std::io::ErrorKind::Other,
+        let schema = state.schema.lock().map_err(|_| Error::new(
+            ErrorKind::Other,
             "Failed to lock schema"
         ))?;
 
@@ -859,7 +859,7 @@ pub async fn refresh_all_tables(state: &web::Data<AppState>) -> Result<()> {
             .filter(|&key| key.replace("_initial", "")
                     .replace("_updates", "")
                     .is_empty()).map(|key| key.replace("_initial", ""))
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<HashSet<_>>()
             .into_iter()
             .collect()
     };
@@ -869,15 +869,15 @@ pub async fn refresh_all_tables(state: &web::Data<AppState>) -> Result<()> {
         // First, get the initial table data
         let initial_table_data = get_table_data(state.clone(), &table_name)
             .await
-            .map_err(|_| std::io::Error::new(
-                std::io::ErrorKind::Other,
+            .map_err(|_| Error::new(
+                ErrorKind::Other,
                 format!("Failed to get table data for {}", table_name)
             ))?;
         // Recalculate the entire table
         recalculate_table(state, &table_name, initial_table_data)
             .await
-            .map_err(|_| std::io::Error::new(
-                std::io::ErrorKind::Other,
+            .map_err(|_| Error::new(
+                ErrorKind::Other,
                 format!("Failed to recalculate table {}", table_name)
             ))?;
     }
@@ -887,7 +887,7 @@ pub async fn refresh_all_tables(state: &web::Data<AppState>) -> Result<()> {
 
 
 pub async fn get_table_at_timestamp(
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     table_name: &String,
     timestamp: String,
 ) -> Result<Vec<Vec<String>>> {
@@ -898,7 +898,7 @@ pub async fn get_table_at_timestamp(
 
     // Parse the provided timestamp to a `NaiveDateTime`.
     let target_timestamp = NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S")
-        .map_err(|_| std::io::Error::new(
+        .map_err(|_| Error::new(
             ErrorKind::InvalidInput,
             format!("Invalid timestamp format: {}", timestamp),
         ))?;
@@ -973,15 +973,15 @@ fn row_timestamp_is_before(row: &Vec<String>, target_timestamp: &NaiveDateTime) 
 pub async fn get_column_values(
     table_name: &str,
     column_name: &str,
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
     row_uuid: Option<&str>,
 ) -> Result<HashSet<String>> {
     let table_data = get_table_data(state.clone(), table_name).await?;
     let schema = state.schema.lock().unwrap();
     let initial_table_name = format!("{}_initial", table_name);
     let table = schema.tables.get(&initial_table_name).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
+        Error::new(
+            ErrorKind::NotFound,
             format!("Table '{}' not found in schema", initial_table_name),
         )
     })?;
@@ -1023,7 +1023,7 @@ pub async fn get_column_values(
 
 pub async fn get_column_names(
     table_name: &str,
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
 ) -> Result<Vec<String>> {
     debug!("get_column_names called for table: {}", table_name);
 
@@ -1032,7 +1032,7 @@ pub async fn get_column_names(
     let schema_result = state.schema.lock();
     if let Err(e) = &schema_result {
         error!("Failed to acquire schema lock: {}", e);
-        return Err(std::io::Error::new(
+        return Err(Error::new(
             ErrorKind::Other,
             format!("Failed to acquire schema lock: {}", e)
         ));
@@ -1053,7 +1053,7 @@ pub async fn get_column_names(
         None => {
             error!("Table '{}' does not exist in schema", initial_table_name);
             debug!("Available tables in schema: {:?}", schema.tables.keys().collect::<Vec<_>>());
-            return Err(std::io::Error::new(
+            return Err(Error::new(
                 ErrorKind::NotFound,
                 format!("Table '{}' does not exist in the schema", initial_table_name),
             ));
@@ -1074,7 +1074,7 @@ pub async fn get_column_names(
 async fn get_table_api(
     req: HttpRequest,
     path: web::Path<String>,
-    data: web::Data<AppState>) -> impl Responder {
+    data: Data<AppState>) -> impl Responder {
 
     // Authenticate first
     match authenticate_request(&req, &data).await {
@@ -1108,7 +1108,7 @@ async fn get_table_api(
                     }
                 }
                 Err(e) => {
-                    if e.kind() == std::io::ErrorKind::NotFound {
+                    if e.kind() == ErrorKind::NotFound {
                         HttpResponse::NotFound().json(serde_json::json!({"error": "Table data file not found"}))
                     } else {
                         HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error retrieving table data: {}", e)}))

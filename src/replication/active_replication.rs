@@ -11,7 +11,7 @@ use crate::AppState;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 use crate::recovery::recovery::LogRecoveryManager;
 use crate::replication::passive_replication::{get_replication_queue_status, queue_passive_replication, ReplicationError};
-use crate::replication::replication_nodes::{load_nodes, validate_shared_secret, ReplicationMode, ReplicationNode};
+use crate::replication::replication_nodes::{ get_address_from_node, load_nodes, validate_shared_secret, ReplicationMode, ReplicationNode};
 use crate::schema::schema::{refresh_schema, Schema};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -47,7 +47,7 @@ async fn append_and_action_log(app_state: &web::Data<AppState>, entry: &ChangeLo
 }
 
 // Helper checking if the log is already present to avoid duplication
-fn is_log_already_present(log_file_path: &std::path::PathBuf, change_id: &Uuid) -> Result<bool, std::io::Error> {
+fn is_log_already_present(log_file_path: &std::path::PathBuf, change_id: &Uuid) -> Result<bool, io::Error> {
     // Attempt to open the file
     match OpenOptions::new().read(true).open(log_file_path) {
         Ok(file) => {
@@ -69,7 +69,7 @@ fn is_log_already_present(log_file_path: &std::path::PathBuf, change_id: &Uuid) 
 }
 
 
-fn append_to_file(file_path: &std::path::PathBuf, content: &str) -> Result<(), std::io::Error> {
+fn append_to_file(file_path: &std::path::PathBuf, content: &str) -> Result<(), io::Error> {
     let mut file = OpenOptions::new().append(true).create(true).open(file_path)?;
     writeln!(file, "{}", content)?;
     Ok(())
@@ -142,13 +142,7 @@ pub fn replicate_change_to_nodes(
             let replication_request = ReplicationRequest {
                 schema: state.schema.lock().unwrap().clone(),
                 entries: vec![log_entry.clone()],
-                target_node: ReplicationNode {
-                    name: node.name.clone(),
-                    node_url: node.node_url.clone(),
-                    description: node.description.clone(),
-                    replication_mode: node.replication_mode.clone(),
-                    shared_secret: node.shared_secret.clone(),
-                },
+                target_node: node.clone(),
             };
 
             match replicate_to_single_node(&client, node, &replication_request).await {
@@ -173,12 +167,9 @@ pub async fn replicate_to_single_node(
     request: &ReplicationRequest,
 ) -> Result<bool, Box<dyn std::error::Error>> { // Original return type
 
-    let addrs = match node.resolve_node_url() {
-        Ok(addrs) => addrs,
-        Err(e) => {
-            error!("Failed to resolve address for node {}: {}", node.name, e);
-            return Err(e.into());
-        }
+    let addrs = match get_address_from_node(node) {
+        Ok(value) => value,
+        Err(value) => return value,
     };
     let target_addr = addrs.first().ok_or("Could not resolve any addresses")?;
     let url = if node.node_url.starts_with("https") {
@@ -206,13 +197,15 @@ pub async fn replicate_to_single_node(
     }
 }
 
+
+
 // In active_replication.rs
 pub async fn replicate_to_single_node_global(
     node_url: String,  // Use owned String instead of reference
     request: ReplicationRequest  // Pass by value
 ) -> Result<(), ReplicationError> {
     // Create client inside the function
-    let client = awc::Client::new();
+    let client = Client::new();
 
     // Serialize request
     let serialized_request = serde_json::to_string(&request)

@@ -9,7 +9,7 @@ use actix_web::{post, web, HttpRequest, HttpResponse};
 use tracing::log::{debug, error, info};
 use uuid::Uuid;
 use regex::Regex;
-use serde_json::json;
+use serde_json::{json, Value};
 use crate::auth::auth::authenticate_request;
 use crate::tables::table::extract_literal_value;
 
@@ -30,31 +30,31 @@ pub async fn execute_query(
     }
     #[allow(clippy::never_loop)]
     for (.., ast_node) in ast_nodes.iter().enumerate() {
-        match ast_node {
+        return match ast_node {
             ASTNode::Select { columns, table, timestamp } => {
-                return handle_select(columns, table, timestamp, &data, where_clause.clone()).await;
+                handle_select(columns, table, timestamp, &data, where_clause.clone()).await
             }
             ASTNode::Create { table, columns } => {
-                return handle_create_table(table, columns, &data);
+                handle_create_table(table, columns, &data)
             }
             ASTNode::Insert { table, values, columns } => {
-                return handle_insert(table, values, columns, &data).await;
+                handle_insert(table, values, columns, &data).await
             }
             ASTNode::Update { table, values } => {
-                return handle_update(table, values, &data, &where_clause).await;
+                handle_update(table, values, &data, &where_clause).await
             }
             ASTNode::Delete { table } => {
-                return handle_delete(table, &data, &where_clause).await;
+                handle_delete(table, &data, &where_clause).await
             }
             ASTNode::Drop { table } => {
-                return handle_drop(table, &data).await;
+                handle_drop(table, &data).await
             }
             _ => {
-                return HttpResponse::BadRequest().json(serde_json::json!({"error": "Unsupported AST Node type"}));
+                HttpResponse::BadRequest().json(json!({"error": "Unsupported AST Node type"}))
             }
         }
     }
-    HttpResponse::BadRequest().json(serde_json::json!({"error": "No valid SQL query provided"}))
+    HttpResponse::BadRequest().json(json!({"error": "No valid SQL query provided"}))
 }
 
 async fn handle_select(
@@ -97,7 +97,7 @@ async fn handle_select(
                         },
                         Err(e) => {
                             error!("Error fetching column names: {}", e);
-                            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error fetching column names: {}", e)}));
+                            return HttpResponse::InternalServerError().json(json!({"error": format!("Error fetching column names: {}", e)}));
                         }
                     };
 
@@ -115,16 +115,16 @@ async fn handle_select(
 
                 if result.len() <= 1 {
                     debug!("No matching rows found in result");
-                    HttpResponse::Ok().json(serde_json::json!({ "message": "No matching rows found" }))
+                    HttpResponse::Ok().json(json!({ "message": "No matching rows found" }))
                 } else {
                     match serde_json::to_string(&result) {
                         Ok(json) => {
                             debug!("Successfully serialized result");
-                            HttpResponse::Ok().json(serde_json::from_str::<serde_json::Value>(&json).unwrap())
+                            HttpResponse::Ok().json(serde_json::from_str::<Value>(&json).unwrap())
                         },
                         Err(e) => {
                             error!("Serialization error: {}", e);
-                            HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Serialization error: {}", e)}))
+                            HttpResponse::InternalServerError().json(json!({"error": format!("Serialization error: {}", e)}))
                         }
                     }
                 }
@@ -132,16 +132,16 @@ async fn handle_select(
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     error!("Table not found: {}", table_name);
-                    HttpResponse::NotFound().json(serde_json::json!({"error": format!("Table '{}' not found", table_name)}))
+                    HttpResponse::NotFound().json(json!({"error": format!("Table '{}' not found", table_name)}))
                 } else {
                     error!("Error retrieving table data: {}", e);
-                    HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error retrieving table data: {}", e)}))
+                    HttpResponse::InternalServerError().json(json!({"error": format!("Error retrieving table data: {}", e)}))
                 }
             }
         }
     } else {
         error!("Invalid table name in SELECT query");
-        HttpResponse::BadRequest().json(serde_json::json!({ "error": "Invalid table name" }))
+        HttpResponse::BadRequest().json(json!({ "error": "Invalid table name" }))
     }
 }
 
@@ -179,11 +179,11 @@ fn handle_create_table(
 
         // Execute the table creation
         match create_table(&schema_table, data) {
-            Ok(_) => HttpResponse::Ok().json(serde_json::json!({"message": "Table Created"})),
-            Err(err) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error creating table: {}", err)}))
+            Ok(_) => HttpResponse::Ok().json(json!({"message": "Table Created"})),
+            Err(err) => HttpResponse::InternalServerError().json(json!({"error": format!("Error creating table: {}", err)}))
         }
     } else {
-        HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid table name in CREATE TABLE"}))
+        HttpResponse::BadRequest().json(json!({"error": "Invalid table name in CREATE TABLE"}))
     }
 }
 
@@ -258,14 +258,14 @@ async fn handle_insert(
 
         // Insert the row into the table and get back the UUID
         match insert_row(table_name, row_data, data, column_names).await {
-            Ok(uuid) => HttpResponse::Ok().json(serde_json::json!({
+            Ok(uuid) => HttpResponse::Ok().json(json!({
                 "message": "Row inserted",
                 "uuid": uuid
             })),
-            Err(err) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error inserting row: {}", err)})),
+            Err(err) => HttpResponse::InternalServerError().json(json!({"error": format!("Error inserting row: {}", err)})),
         }
     } else {
-        HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid table name in INSERT statement"}))
+        HttpResponse::BadRequest().json(json!({"error": "Invalid table name in INSERT statement"}))
     }
 }
 
@@ -277,7 +277,7 @@ async fn handle_delete(
     if let Identifier::Name(table_name) = table {
         // Ensure a WHERE clause is provided
         if where_clause.is_none() {
-            return HttpResponse::BadRequest().json(serde_json::json!({"error": "DELETE must include a WHERE clause with a valid filter"}));
+            return HttpResponse::BadRequest().json(json!({"error": "DELETE must include a WHERE clause with a valid filter"}));
         }
 
 
@@ -300,22 +300,22 @@ async fn handle_delete(
                     .collect();
 
                 if rows_to_delete.is_empty() {
-                    return HttpResponse::NotFound().json(serde_json::json!({"error": "No rows matched the specified condition"}));
+                    return HttpResponse::NotFound().json(json!({"error": "No rows matched the specified condition"}));
                 }
                 // Call `delete_row` for each filtered row
                 for row in &rows_to_delete {
                     if let Some(row_id) = row.first() {
                         if let Err(e) = delete_row(table_name, row_id, data).await {
-                            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error deleting row: {}", e)}));
+                            return HttpResponse::InternalServerError().json(json!({"error": format!("Error deleting row: {}", e)}));
                         }
                     }
                 }
-                HttpResponse::Ok().json(serde_json::json!({"message": format!("Deleted {} rows", rows_to_delete.len())}))
+                HttpResponse::Ok().json(json!({"message": format!("Deleted {} rows", rows_to_delete.len())}))
             }
-            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error loading initial data: {}", e)})),
+            Err(e) => HttpResponse::InternalServerError().json(json!({"error": format!("Error loading initial data: {}", e)})),
         }
     } else {
-        HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid table name in DELETE statement"}))
+        HttpResponse::BadRequest().json(json!({"error": "Invalid table name in DELETE statement"}))
     }
 }
 
@@ -339,12 +339,12 @@ async fn handle_update(
 
         // Ensure a WHERE clause is provided
         if where_clause.is_none() {
-            return HttpResponse::BadRequest().json(serde_json::json!({"error": "UPDATE must include a WHERE clause with a valid UUID"}));
+            return HttpResponse::BadRequest().json(json!({"error": "UPDATE must include a WHERE clause with a valid UUID"}));
         }
 
         let condition = where_clause.as_ref().unwrap();
         if !is_uuid_where_clause(condition) {
-            return HttpResponse::BadRequest().json(serde_json::json!({"error": format!("WHERE clause must contain a valid UUID condition for table '{}'",table_name)}));
+            return HttpResponse::BadRequest().json(json!({"error": format!("WHERE clause must contain a valid UUID condition for table '{}'",table_name)}));
         }
 
         // Load data to process the update
@@ -367,26 +367,26 @@ async fn handle_update(
                 info!("Filtered rows: {:?}", filtered_rows);
 
                 if filtered_rows.is_empty() {
-                    return HttpResponse::NotFound().json(serde_json::json!({"error": "No rows matched the specified condition"}));
+                    return HttpResponse::NotFound().json(json!({"error": "No rows matched the specified condition"}));
                 }
 
                 // Apply updates to the filtered rows
                 for row in &filtered_rows {
                     if let Some(row_id) = row.first() {
                         if let Err(e) = update_row(table_name, row_id, updated_values.clone(), data).await {
-                            return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error updating row: {}", e)}));
+                            return HttpResponse::InternalServerError().json(json!({"error": format!("Error updating row: {}", e)}));
                         }
                     }
                 }
                 if let Err(e) = recalculate_table(data, table_name, initial_data).await {
-                    return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error recalculating data: {}", e)}));
+                    return HttpResponse::InternalServerError().json(json!({"error": format!("Error recalculating data: {}", e)}));
                 }
-                HttpResponse::Ok().json(serde_json::json!({"message": "Rows updated"}))
+                HttpResponse::Ok().json(json!({"message": "Rows updated"}))
             }
-            Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("Error loading initial data: {}", e)})),
+            Err(e) => HttpResponse::InternalServerError().json(json!({"error": format!("Error loading initial data: {}", e)})),
         }
     } else {
-        HttpResponse::BadRequest().json(serde_json::json!({"error": "Invalid table name in UPDATE statement"}))
+        HttpResponse::BadRequest().json(json!({"error": "Invalid table name in UPDATE statement"}))
     }
 }
 
@@ -422,7 +422,7 @@ async fn process_select(
     table_data: &[Vec<String>],
     data: web::Data<AppState>,
     table_name: &String,
-) -> Vec<Vec<serde_json::Value>> {
+) -> Vec<Vec<Value>> {
     let mut result = Vec::new();
 
     if table_data.len() <=1 {
@@ -441,32 +441,14 @@ async fn process_select(
         if columns.len() == 1 && matches!(columns[0], Identifier::Star) {
             // Select all columns
             for value in row.iter() {
-                if let Ok(int_val) = value.parse::<i64>() {
-                    selected_row.push(serde_json::Value::Number(int_val.into()));
-                } else if let Ok(float_val) = value.parse::<f64>() {
-                    selected_row.push(serde_json::Value::Number(
-                        serde_json::Number::from_f64(float_val).unwrap(),
-                    ));
-                } else {
-                    selected_row.push(serde_json::Value::String(value.trim_matches('"').to_string()));
-                }
+                push_value_to_row(&mut selected_row, value);
             }
         } else {
             for col in columns {
                 if let Identifier::Name(col_name) = col {
                     if let Some(index) = find_column_index(&column_names, col_name) {
                         if let Some(value) = row.get(index) {
-                            if let Ok(int_val) = value.parse::<i64>() {
-                                selected_row.push(serde_json::Value::Number(int_val.into()));
-                            } else if let Ok(float_val) = value.parse::<f64>() {
-                                selected_row.push(serde_json::Value::Number(
-                                    serde_json::Number::from_f64(float_val).unwrap(),
-                                ));
-                            } else {
-                                selected_row.push(serde_json::Value::String(
-                                    value.trim_matches('"').to_string(),
-                                ));
-                            }
+                            push_value_to_row(&mut selected_row, value);
                         }
                     }
                 }
@@ -479,6 +461,20 @@ async fn process_select(
     result
 }
 
+fn push_value_to_row(selected_row: &mut Vec<Value>, value: &String) {
+    if let Ok(int_val) = value.parse::<i64>() {
+        selected_row.push(Value::Number(int_val.into()));
+    } else if let Ok(float_val) = value.parse::<f64>() {
+        selected_row.push(Value::Number(
+            serde_json::Number::from_f64(float_val).unwrap(),
+        ));
+    } else {
+        selected_row.push(Value::String(
+            value.trim_matches('"').to_string(),
+        ));
+    }
+}
+
 pub fn evaluate_where_clause(
     condition: &Expression,
     row: &[String],
@@ -489,24 +485,10 @@ pub fn evaluate_where_clause(
     match condition {
         Expression::Comparison { left, operator, right } => {
             // Resolve left value
-            let left_value = match left {
-                Identifier::Name(name) => {
-                    let index_result = find_column_index(&column_names_upper, &name.to_uppercase());
-                    index_result.and_then(|index| row.get(index).map(String::from))
-                }
-                Identifier::Literal(lit, _) => Some(lit.clone()),
-                _ => None, // Unsupported
-            };
+            let left_value = match_values(row, &column_names_upper, left);
 
             // Resolve right value
-            let right_value = match right {
-                Identifier::Name(name) => {
-                    let index_result = find_column_index(&column_names_upper, &name.to_uppercase());
-                    index_result.and_then(|index| row.get(index).map(String::from))
-                }
-                Identifier::Literal(lit, _) => Some(lit.clone()),
-                _ => None, // Unsupported
-            };
+            let right_value = match_values(row, &column_names_upper, right);
 
             if left_value.is_none() || right_value.is_none() {
                 return false; // No value to compare
@@ -536,6 +518,18 @@ pub fn evaluate_where_clause(
             }
         }
     }
+}
+
+fn match_values(row: &[String], column_names_upper: &Vec<String>, value: &Identifier) -> Option<String> {
+    let left_value = match value {
+        Identifier::Name(name) => {
+            let index_result = find_column_index(&column_names_upper, &name.to_uppercase());
+            index_result.and_then(|index| row.get(index).map(String::from))
+        }
+        Identifier::Literal(lit, _) => Some(lit.clone()),
+        _ => None, // Unsupported
+    };
+    left_value
 }
 
 /// Helper function to evaluate `LIKE` conditions
@@ -604,7 +598,7 @@ async fn check_for_reserved_words(sql_query: &str) -> Result<(), HttpResponse> {
     let reserved_keyword = USERS_TABLE;
     if sql_query.to_lowercase().contains(reserved_keyword) {
         // Reject the query with a clear error message
-        return Err(HttpResponse::Forbidden().json(serde_json::json!({
+        return Err(HttpResponse::Forbidden().json(json!({
             "error": format!("Query contains reserved keyword: {}", reserved_keyword)
         })));
     }

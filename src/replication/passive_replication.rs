@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{ Arc, Mutex};
 use std::error::Error;
 use std::{fmt};
+use std::time::Duration;
 use actix_web::{web, HttpResponse, post, get, Error as ActixError};
 use actix_web::web::Data;
 use serde::{Serialize, Deserialize};
@@ -255,7 +256,7 @@ pub(crate) async fn try_replicate_request(
 // Actix route for initiating passive replication
 #[post("/api/passive-replication/queue")]
 pub async fn queue_passive_replication(
-    app_state: web::Data<AppState>,
+    app_state: Data<AppState>,
     payload: web::Json<ReplicationRequest>,
 ) -> Result<HttpResponse, ActixError> {
     // Get the passive replication queue from app state
@@ -275,8 +276,8 @@ pub async fn replication_scheduler_loop(passive_replication_interval: i64, sync_
     debug!("DIAGNOSTIC: Starting inside the async Loop Function");
     let passive_interval_duration = std::time::Duration::from_secs(passive_replication_interval as u64);
     let sync_interval_duration = std::time::Duration::from_secs(sync_interval);
-    let mut passive_last_tick = Instant::now();
-    let mut sync_last_tick = Instant::now();
+    let mut passive_last_tick =  Instant::now() - Duration::from_secs(5);
+    let mut sync_last_tick = Instant::now() - Duration::from_secs(5);
     let failure_counts: Arc<Mutex<HashMap<Uuid, u32>>> = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
@@ -350,7 +351,7 @@ pub async fn replication_scheduler_loop(passive_replication_interval: i64, sync_
 // Optional: Route to check replication queue status
 #[get("/api/passive-replication/status")]
 pub async fn get_replication_queue_status(
-    app_state: web::Data<AppState>,
+    app_state: Data<AppState>,
 ) -> Result<HttpResponse, ActixError> {
     let queue = app_state.passive_replication_queue.lock().unwrap();
 

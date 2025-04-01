@@ -1,4 +1,5 @@
 use std::{fs, io};
+use std::error::Error;
 use std::fs::File;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
@@ -28,7 +29,7 @@ pub struct ReplicationNode {
 }
 
 impl ReplicationNode {
-    pub(crate) fn resolve_node_url(&self) -> Result<Vec<SocketAddr>, std::io::Error> {
+    pub(crate) fn resolve_node_url(&self) -> Result<Vec<SocketAddr>, io::Error> {
         debug!("Attempting to resolve socket addresses {}", self.node_url);
 
         // Parse the URL to extract just the host and port
@@ -51,8 +52,8 @@ impl ReplicationNode {
 
                 if addresses.is_empty() {
                     error!("No socket addresses could be resolved {}", self.node_url);
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    Err(io::Error::new(
+                        io::ErrorKind::Other,
                         format!("No addresses found for {}", self.node_url)
                     ))
                 } else {
@@ -66,7 +67,16 @@ impl ReplicationNode {
         }
     }
 }
-
+pub fn get_address_from_node(node: &ReplicationNode) -> Result<Vec<SocketAddr>, Result<bool, Box<dyn Error>>> {
+    let addrs = match node.resolve_node_url() {
+        Ok(addrs) => addrs,
+        Err(e) => {
+            error!("Failed to resolve address for node {}: {}", node.name, e);
+            return Err(Err(e.into()));
+        }
+    };
+    Ok(addrs)
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct CrossNodeRegistrationRequest {
@@ -125,7 +135,7 @@ pub fn load_nodes(config: &DatabaseConfig) -> io::Result<NodesConfig> {
     let path = Path::new(&config.log_dir).join(&config.repl_node_file);
     info!("Loading replication nodes from: {}", path.display());
     if path.exists() {
-        let file = fs::File::open(path)?;
+        let file = File::open(path)?;
         info!("Loaded replication nodes from path ");
         serde_json::from_reader(file).map_err(|e|
             io::Error::new(io::ErrorKind::InvalidData, format!("JSON parsing failed: {}", e))
@@ -137,7 +147,7 @@ pub fn load_nodes(config: &DatabaseConfig) -> io::Result<NodesConfig> {
 
 pub fn save_nodes(nodes: &NodesConfig, config: &DatabaseConfig) -> io::Result<()> {
     let path = Path::new(&config.log_dir).join(&config.repl_node_file);
-    let file = fs::File::create(path)?;
+    let file = File::create(path)?;
     serde_json::to_writer_pretty(file, nodes).map_err(|e|
         io::Error::new(io::ErrorKind::Other, format!("Failed to serialize JSON: {}", e))
     )
@@ -147,7 +157,7 @@ pub fn save_nodes(nodes: &NodesConfig, config: &DatabaseConfig) -> io::Result<()
 #[post("/api/register-node")]
 pub async fn register_node(
     req: web::Json<NodeRegistrationRequest>,
-    app_state: web::Data<AppState>
+    app_state: Data<AppState>
 ) -> impl Responder {
     let config = app_state.config.clone();
     let mut nodes_config = load_nodes(&config).unwrap_or_default();
@@ -174,7 +184,7 @@ pub async fn register_node(
 #[post("/api/update-node-replication")]
 pub async fn update_node_replication(
     req: web::Json<UpdateNodeReplicationRequest>,
-    app_state: web::Data<AppState>
+    app_state: Data<AppState>
 ) -> impl Responder {
     let config = app_state.config.clone();
 
@@ -201,13 +211,7 @@ pub async fn update_node_replication(
         node.replication_mode = req.replication_mode.clone();
 
         // Create a response node before saving
-        let response_node = ReplicationNode {
-            name: node.name.clone(),
-            node_url: node.node_url.clone(),
-            description: node.description.clone(),
-            replication_mode: node.replication_mode.clone(),
-            shared_secret: node.shared_secret.clone(),
-        };
+        let response_node = create_default_node(node);
 
         Ok(response_node)
     })();
@@ -224,16 +228,24 @@ pub async fn update_node_replication(
     }
 }
 
-
+pub fn create_default_node(node: &mut ReplicationNode) -> ReplicationNode {
+    ReplicationNode {
+        name: node.name.clone(),
+        node_url: node.node_url.clone(),
+        description: node.description.clone(),
+        replication_mode: node.replication_mode.clone(),
+        shared_secret: node.shared_secret.clone(),
+    }
+}
 
 #[get("/api/load-nodes")]
 pub async fn load_nodes_endpoint(
-    app_state: web::Data<AppState>
+    app_state: Data<AppState>
 ) -> impl Responder {
     let config = app_state.config.clone();
 
     // Explicitly create logs directory if it doesn't exist
-    std::fs::create_dir_all(&config.log_dir)
+    fs::create_dir_all(&config.log_dir)
         .unwrap_or_else(|_| eprintln!("Failed to create log directory"));
 
     // Create nodes file if it doesn't exist
@@ -270,7 +282,7 @@ pub async fn load_nodes_endpoint(
 #[post("/api/cross-node-register")]
 pub async fn cross_node_register(
     req: web::Json<CrossNodeRegistrationRequest>,
-    app_state: web::Data<AppState>
+    app_state: Data<AppState>
 ) -> impl Responder {
     let config = app_state.config.clone();
 

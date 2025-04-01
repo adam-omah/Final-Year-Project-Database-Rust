@@ -129,7 +129,7 @@ fn init_database(config: &DatabaseConfig) -> Result<()> {
 
 
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<()> {
     // Initialize tracing for logging
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
@@ -256,6 +256,7 @@ mod app_tests {
     use std::fs;
     use actix_web::http::StatusCode;
     use actix_web::test;
+    use actix_web::web::Data;
     use serde_json::Value;
     use schema::{schema::load_schema, schema::Column, schema::Table};
     use tables::{table::create_table, table::insert_row};
@@ -272,18 +273,9 @@ mod app_tests {
         };
         init_database(&test_config)?;
         let schema = Arc::new(Mutex::new(load_schema(&test_config)?));
-        let cache = Arc::new(Mutex::new(BTreeMap::new()));
-        let log_recovery_manager = LogRecoveryManager::new(test_config.clone());
 
         // Create a test application with your route
-        let app_state = web::Data::new(AppState {
-            schema: schema.clone(),
-            config: test_config.clone(),
-            cache: cache.clone(),
-            change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
-            log_recovery_manager: log_recovery_manager.clone(),
-            passive_replication_queue: Arc::new(Mutex::new(Default::default())),
-        });
+        let app_state = Data::new(AppState::test());
 
         if !schema.lock().unwrap().tables.contains_key("users") {
             let user_table = Table {
@@ -351,19 +343,8 @@ mod app_tests {
             ..Default::default()
         };
         init_database(&test_config)?;
-        let cache = Arc::new(Mutex::new(BTreeMap::new()));
-        let schema = Arc::new(Mutex::new(load_schema(&test_config)?));
-        let log_directory = test_config.log_dir.clone();
-        let log_recovery_manager = LogRecoveryManager::new(test_config.clone());
 
-        let app_state = web::Data::new(AppState {
-            schema: schema.clone(),
-            config: test_config.clone(),
-            cache: cache.clone(),
-            change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
-            log_recovery_manager: log_recovery_manager.clone(),
-            passive_replication_queue: Arc::new(Mutex::new(Default::default())),
-        });
+        let app_state = Data::new(AppState::test());
 
         // Initialize Actix Web app
         let app = test::init_service(
@@ -409,20 +390,8 @@ mod app_tests {
             ..Default::default() // Use default for other values
         };
         init_database(&test_config)?;
-        let schema = Arc::new(Mutex::new(load_schema(&test_config)?));
-        let cache = Arc::new(Mutex::new(BTreeMap::new()));
-        let log_directory = test_config.log_dir.clone();
-        let log_recovery_manager = LogRecoveryManager::new(test_config.clone());
-
         // Create a test application with your route
-        let app_state = web::Data::new(AppState {
-            schema: schema.clone(),
-            config: test_config.clone(),
-            cache: cache.clone(),
-            change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
-            log_recovery_manager: log_recovery_manager.clone(),
-            passive_replication_queue: Arc::new(Mutex::new(Default::default())),
-        });
+        let app_state = Data::new(AppState::test());
 
         let app = test::init_service(
             App::new()
@@ -454,19 +423,8 @@ mod app_tests {
             ..Default::default()
         };
         init_database(&test_config)?;
-        let schema = Arc::new(Mutex::new(load_schema(&test_config)?));
-        let cache = Arc::new(Mutex::new(BTreeMap::new()));
-        let log_directory = test_config.log_dir.clone();
-        let log_recovery_manager = LogRecoveryManager::new(test_config.clone());
 
-        let app_state = web::Data::new(AppState {
-            schema: schema.clone(),
-            config: test_config.clone(),
-            cache: cache.clone(),
-            change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
-            log_recovery_manager: log_recovery_manager.clone(),
-            passive_replication_queue: Arc::new(Mutex::new(Default::default())),
-        });
+        let app_state = Data::new(AppState::test());
 
         let app = test::init_service(
             App::new()

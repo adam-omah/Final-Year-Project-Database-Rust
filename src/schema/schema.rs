@@ -123,7 +123,7 @@ pub fn map_string_to_rule(rule_str: &str) -> Option<Rule> {
 // Helper function to parse a CHECK constraint into an `Expression`
 fn parse_expression(expr_str: &str) -> Option<Expression> {
     // Regex to match expressions like "age > 18" or "name = 'John'"
-    let re = Regex::new(r#"(?i)^\s*([\w\.]+)\s*(=|!=|>|>=|<|<=|LIKE)\s*(['"]?[\w\.]+['"]?)\s*$"#).ok()?;
+    let re = Regex::new(r#"(?i)^\s*([\w.]+)\s*(=|!=|>|>=|<|<=|LIKE)\s*(['"]?[\w.]+['"]?)\s*$"#).ok()?;
 
     // Check if expression matches the regex pattern
     let captures = re.captures(expr_str)?;
@@ -227,7 +227,7 @@ pub fn create_table(
     table: Table,
     config: &DatabaseConfig,
     change_logger: &ChangeLogger,
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
 ) -> Result<()> {
     let initial_table_name = format!("{}_initial", table.name);
     let updates_table_name = format!("{}_updates", table.name);
@@ -279,12 +279,12 @@ pub fn create_table(
     // Create the empty `_initial` and `_updates` table files
     let initial_table_path = config.db_dir.join(&config.table_dir).join(initial_table_name);
     if !initial_table_path.exists() {
-        std::fs::File::create(initial_table_path)?;
+        File::create(initial_table_path)?;
     }
 
     let updates_table_path = config.db_dir.join(&config.table_dir).join(updates_table_name);
     if !updates_table_path.exists() {
-        std::fs::File::create(updates_table_path)?;
+        File::create(updates_table_path)?;
     }
 
     let log_entry = change_logger.log_change(
@@ -352,7 +352,7 @@ pub fn drop_table(
 pub async fn check_column_rules(
     column: &Column,
     value: &str, table_name: &str,
-    state: &web::Data<AppState>,
+    state: &Data<AppState>,
     row_uuid: Option<&str>
 ) -> Result<Option<String>> {
     let mut final_value = Some(value.to_string()); // Start with the original value
@@ -460,11 +460,11 @@ pub fn get_column_names_from_schema(
 
 pub fn drop_table_from_cache(
     table_name: &str,
-    state: &web::Data<AppState>
+    state: &Data<AppState>
 ) -> Result<()> {
     let mut cache = state.cache.lock().map_err(|_|
         std::io::Error::new(
-            std::io::ErrorKind::Other,
+            ErrorKind::Other,
             "Failed to acquire cache lock"
         )
     )?;
@@ -517,7 +517,7 @@ mod schema_tests {
     #[test]
     #[should_panic(expected = "Unsupported data type: invalid")]
     fn test_data_type_from_str_invalid() {
-        DataType::from("invalid");
+        let _ = DataType::from("invalid");
     }
 
     #[test]
@@ -554,7 +554,6 @@ mod schema_tests {
                 assert_eq!(operator, ">".to_string());
                 assert_eq!(right, Identifier::Literal("18".to_string(), Some(DataType::Int)));
             },
-            _ => panic!("Expected Comparison expression"),
         }
 
         // Test string comparison
@@ -565,7 +564,6 @@ mod schema_tests {
                 assert_eq!(operator, "=".to_string());
                 assert_eq!(right, Identifier::Literal("John".to_string(), Some(DataType::String)));
             },
-            _ => panic!("Expected Comparison expression"),
         }
     }
 

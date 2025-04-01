@@ -30,7 +30,7 @@ impl LogRecoveryManager {
         let log_entries = self.read_log_entries()?;
 
         // Group logs by table name
-        let mut table_logs: std::collections::HashMap<String, Vec<serde_json::Value>> =
+        let mut table_logs: std::collections::HashMap<String, Vec<Value>> =
             std::collections::HashMap::new();
 
         for entry in log_entries {
@@ -52,7 +52,7 @@ impl LogRecoveryManager {
     }
 
     /// Read log entries from the file
-    fn read_log_entries(&self) -> Result<Vec<serde_json::Value>> {
+    fn read_log_entries(&self) -> Result<Vec<Value>> {
         let file_location = self.config.log_dir.join(&self.config.log_file);
         info!("Reading log file: {}", file_location.display());
         let file = File::open(self.config.log_dir.join(&self.config.log_file))
@@ -63,7 +63,7 @@ impl LogRecoveryManager {
         let mut log_entries = Vec::new();
         for line in reader.lines() {
             let line = line.context("Failed to read log line")?;
-            let entry: serde_json::Value = serde_json::from_str(&line)
+            let entry: Value = serde_json::from_str(&line)
                 .context("Failed to parse log entry")?;
             log_entries.push(entry);
         }
@@ -283,7 +283,7 @@ impl LogRecoveryManager {
     }
 
     /// Handle row update
-    pub(crate) async fn handle_row_update(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
+    pub(crate) async fn handle_row_update(&self, updates_table_path: &str, log: &Value) -> Result<()> {
         // Get row data
         let row_data = log["data"]["row_data"].as_array()
             .context("Invalid row data")?;
@@ -381,7 +381,7 @@ impl LogRecoveryManager {
 
 
     /// Handle row deletion
-    pub(crate) async fn handle_row_deletion(&self, updates_table_path: &str, log: &serde_json::Value) -> Result<()> {
+    pub(crate) async fn handle_row_deletion(&self, updates_table_path: &str, log: &Value) -> Result<()> {
         // Get row data
         let row_data = log["data"]["row_data"].as_array()
             .context("Invalid row data")?;
@@ -463,7 +463,7 @@ impl LogRecoveryManager {
         Ok(())
     }
 
-    fn get_log_timestamp(&self, log: &serde_json::Value) -> Option<DateTime<Utc>> {
+    fn get_log_timestamp(&self, log: &Value) -> Option<DateTime<Utc>> {
         // Timestamp candidates in order of priority
         let timestamp_candidates = vec![
             // 1. Direct timestamp in data
@@ -540,7 +540,7 @@ impl LogRecoveryManager {
         info!("Total log entries: {}", log_entries.len());
 
         // Detailed logging for filtering
-        let filtered_logs: Vec<serde_json::Value> = log_entries
+        let filtered_logs: Vec<Value> = log_entries
             .into_iter()
             .filter(|log| {
                 if let Some(log_time) = self.get_log_timestamp(log) {
@@ -561,7 +561,7 @@ impl LogRecoveryManager {
         }
 
         // Group logs by table name
-        let mut table_logs: std::collections::HashMap<String, Vec<serde_json::Value>> =
+        let mut table_logs: std::collections::HashMap<String, Vec<Value>> =
             std::collections::HashMap::new();
 
         for log in filtered_logs {
@@ -614,7 +614,7 @@ async fn recover_specific_table(config: &DatabaseConfig ,table_name: &str) -> Re
     let log_entries = recovery_manager.read_log_entries()?;
 
     // Filter logs for specific table
-    let table_specific_logs: Vec<serde_json::Value> = log_entries
+    let table_specific_logs: Vec<Value> = log_entries
         .into_iter()
         .filter(|entry| {
             entry.get("table_name")
@@ -651,13 +651,13 @@ pub async fn trigger_log_recovery(
                 Ok(_) => {
                     refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
                     if let Err(e) = refresh_all_tables(&app_state).await {
-                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                        return HttpResponse::InternalServerError().json(json!({
                             "status": "error",
                             "message": format!("Log recovery succeeded but table refresh failed: {}", e)
                         }));
                     }
                     info!("Log recovery completed successfully");
-                    HttpResponse::Ok().json(serde_json::json!({
+                    HttpResponse::Ok().json(json!({
                         "status": "success",
                         "message": "Log recovery completed"
                     }))
@@ -665,13 +665,13 @@ pub async fn trigger_log_recovery(
                 Err(e) => {
                     refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
                     if let Err(e) = refresh_all_tables(&app_state).await {
-                        return HttpResponse::InternalServerError().json(serde_json::json!({
+                        return HttpResponse::InternalServerError().json(json!({
                             "status": "error",
                             "message": format!("Log recovery failed and table refresh failed: {}", e)
                         }));
                     }
                     error!("Log recovery failed: {}", e);
-                    HttpResponse::InternalServerError().json(serde_json::json!({
+                    HttpResponse::InternalServerError().json(json!({
                         "status": "error",
                         "message": format!("Log recovery failed: {}", e)
                     }))
@@ -697,17 +697,17 @@ pub async fn trigger_specific_table_recovery(
             match get_table_data(app_state.clone(), &table_name).await {
                 Ok(initial_table_data) => {
                     match recalculate_table(&app_state, &table_name, initial_table_data).await {
-                        Ok(_) => HttpResponse::Ok().json(serde_json::json!({
+                        Ok(_) => HttpResponse::Ok().json(json!({
                             "status": "success",
                             "message": format!("Table {} recovery completed", table_name)
                         })),
-                        Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                        Err(e) => HttpResponse::InternalServerError().json(json!({
                             "status": "error",
                             "message": format!("Table {} recalculation failed: {}", table_name, e)
                         }))
                     }
                 },
-                Err(e) => HttpResponse::InternalServerError().json(serde_json::json!({
+                Err(e) => HttpResponse::InternalServerError().json(json!({
                     "status": "error",
                     "message": format!("Failed to get table data for {}: {}", table_name, e)
                 }))
@@ -716,7 +716,7 @@ pub async fn trigger_specific_table_recovery(
         Err(e) => {
             refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
             error!("Log recovery failed for table {}: {}", table_name, e);
-            HttpResponse::InternalServerError().json(serde_json::json!({
+            HttpResponse::InternalServerError().json(json!({
                 "status": "error",
                 "message": format!("Log recovery failed for table {}: {}", table_name, e)
             }))
@@ -762,7 +762,7 @@ pub async fn trigger_time_based_recovery(
         Ok(_) => {
             refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
             if let Err(e) = refresh_all_tables(&app_state).await {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
+                return HttpResponse::InternalServerError().json(json!({
                     "status": "error",
                     "message": format!("Log recovery succeeded but table refresh failed: {}", e)
                 }));
@@ -775,7 +775,7 @@ pub async fn trigger_time_based_recovery(
         Err(e) => {
             refresh_schema(&app_state.config, &app_state).expect("Unable to refresh Schema!");
             if let Err(e) = refresh_all_tables(&app_state).await {
-                return HttpResponse::InternalServerError().json(serde_json::json!({
+                return HttpResponse::InternalServerError().json(json!({
                     "status": "error",
                     "message": format!("Log recovery failed and table refresh failed: {}", e)
                 }));

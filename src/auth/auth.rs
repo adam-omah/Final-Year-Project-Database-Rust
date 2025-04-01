@@ -127,12 +127,12 @@ async fn login(req: web::Json<LoginRequest>) -> Result<HttpResponse, Error> {
                 Ok(HttpResponse::Ok().json(u)) // Return user info (or a session token)
             } else {
                 warn!("Failed login attempt for user: {} (password mismatch)", login_request.username);
-                Err(error::ErrorUnauthorized("Invalid credentials"))
+                Err(ErrorUnauthorized("Invalid credentials"))
             }
         }
         None => {
             warn!("Failed login attempt for non-existent user: {}", login_request.username);
-            Err(error::ErrorUnauthorized("Invalid credentials"))
+            Err(ErrorUnauthorized("Invalid credentials"))
         }
     }
 }
@@ -144,7 +144,7 @@ pub struct CreateUserRequest {
     pub password: String,
 }
 
-async fn create_user(req: web::Json<CreateUserRequest>, state: web::Data<AppState>) -> Result<HttpResponse, Error> {
+async fn create_user(req: web::Json<CreateUserRequest>, state: Data<AppState>) -> Result<HttpResponse, Error> {
     let create_request = req.into_inner();
 
     // Check if the username already exists
@@ -195,7 +195,7 @@ pub struct UpdateUserRequest {
 
 async fn update_user(
     req: web::Json<UpdateUserRequest>,
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     authenticated_user: User // Get the authenticated user from request
 ) -> Result<HttpResponse, Error> {
     debug!("Updating user");
@@ -282,7 +282,7 @@ pub struct DeleteUserRequest {
 
 async fn delete_user(
     req: web::Json<DeleteUserRequest>,
-    state: web::Data<AppState>,
+    state: Data<AppState>,
     authenticated_user: User // Get the authenticated user from request
 ) -> Result<HttpResponse, Error> {
     let delete_request = req.into_inner();
@@ -471,7 +471,7 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
 
 
 impl FromRequest for User {
-    type Error = actix_web::Error;
+    type Error = Error;
     type Future = Ready<Result<Self, Self::Error>>;
 
     fn from_request(req: &HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
@@ -481,7 +481,7 @@ impl FromRequest for User {
 
         match user {
             Some(user) => ready(Ok(user)),
-            None => ready(Err(actix_web::error::ErrorUnauthorized("Authentication required")))
+            None => ready(Err(ErrorUnauthorized("Authentication required")))
         }
     }
 }
@@ -599,7 +599,7 @@ pub fn configure_auth_routes(cfg: &mut web::ServiceConfig) {
         web::resource("/api/update-user")
             .app_data(web::JsonConfig::default().limit(4096))
             .route(web::post().to(|req: web::Json<UpdateUserRequest>,
-                                   state: web::Data<AppState>,
+                                   state: Data<AppState>,
                                    req_http: HttpRequest| async move {
                 // Manually authenticate the request
                 match authenticate_request(&req_http, &state).await {
@@ -607,7 +607,7 @@ pub fn configure_auth_routes(cfg: &mut web::ServiceConfig) {
                         // Extract user from request extensions after authentication
                         match req_http.extensions().get::<User>() {
                             Some(user) => update_user(req, state, user.clone()).await,
-                            None => Err(error::ErrorUnauthorized("Authentication failed"))
+                            None => Err(ErrorUnauthorized("Authentication failed"))
                         }
                     },
                     Err(e) => Err(e)
@@ -619,7 +619,7 @@ pub fn configure_auth_routes(cfg: &mut web::ServiceConfig) {
         web::resource("/api/delete-user")
             .app_data(web::JsonConfig::default().limit(4096))
             .route(web::post().to(|req: web::Json<DeleteUserRequest>,
-                                   state: web::Data<AppState>,
+                                   state: Data<AppState>,
                                    req_http: HttpRequest| async move {
                 // Manually authenticate the request
                 match authenticate_request(&req_http, &state).await {
@@ -627,7 +627,7 @@ pub fn configure_auth_routes(cfg: &mut web::ServiceConfig) {
                         // Extract user from request extensions after authentication
                         match req_http.extensions().get::<User>() {
                             Some(user) => delete_user(req, state, user.clone()).await,
-                            None => Err(error::ErrorUnauthorized("Authentication failed"))
+                            None => Err(ErrorUnauthorized("Authentication failed"))
                         }
                     },
                     Err(e) => Err(e)

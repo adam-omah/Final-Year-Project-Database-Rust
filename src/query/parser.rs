@@ -402,28 +402,7 @@ fn parse_insert_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
                     let mut values = Vec::new();
                     while *index < tokens.len() && tokens[*index] != ")" {
                         let value_token = tokens[*index].clone();
-                        let identifier = if value_token.starts_with('"') && value_token.ends_with('"') {
-                            // Detect and handle properly quoted strings
-                            Identifier::Literal(
-                                value_token[1..value_token.len() - 1].to_string(), // Strip quotes safely
-                                Some(DataType::String),
-                            )
-                        } else if is_numeric_literal(&value_token) {
-                            // Identify numeric literals (integers or decimals)
-                            Identifier::Literal(value_token, Some(DataType::Int)) // Use DataType::Float if decimals are required
-                        } else if is_uuid(&value_token) {
-                            // Check if the value matches a UUID format
-                            Identifier::Literal(value_token.to_string(), Some(DataType::UUID))
-                        } else if is_datetime(&value_token) {
-                            // Check if the value matches valid datetime formats
-                            Identifier::Literal(value_token.to_string(), Some(DataType::DateTime))
-                        } else if value_token.chars().any(|c| c.is_alphabetic()) {
-                            // Fallback: Contains alphabets, assume string
-                            Identifier::Literal(value_token.to_string(), Some(DataType::String))
-                        } else {
-                            // Handle all other cases as unknown literals
-                            Identifier::Literal(value_token, None)
-                        };
+                        let identifier = match_token_to_identifier(&value_token);
                         values.push(identifier);
                         *index += 1;
 
@@ -499,32 +478,11 @@ fn parse_update_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
             return Err("Expected value after '=' in 'SET' clause".to_string());
         }
         let value_token = tokens[*index].clone();
-        let indentifier = if value_token.starts_with('"') && value_token.ends_with('"') {
-            // Handle string literals
-            Identifier::Literal(
-                value_token[1..value_token.len() - 1].to_string(),
-                Some(DataType::String),
-            )
-        } else if is_numeric_literal(&value_token) {
-            // Handle numbers
-            Identifier::Literal(value_token, Some(DataType::Int)) // Adjust to `Float` if decimals are needed
-        } else if is_uuid(&value_token) {
-            // Handle UUIDs
-            Identifier::Literal(value_token.to_string(), Some(DataType::UUID))
-        } else if is_datetime(&value_token) {
-            // Handle datetime literals
-            Identifier::Literal(value_token.to_string(), Some(DataType::DateTime))
-        } else if value_token.chars().any(|c| c.is_alphabetic()) {
-            // Fallback: Contains alphabets, assume string
-            Identifier::Literal(value_token.to_string(), Some(DataType::String))
-        } else {
-            // Treat anything else as a generic literal
-            Identifier::Literal(value_token, None)
-        };
+        let identifier = match_token_to_identifier(&value_token);
         *index += 1;
 
         // Add the parsed value pair to the set
-        values.push((column, indentifier));
+        values.push((column, identifier));
 
         // Skip commas if multiple assignments
         if *index < tokens.len() && tokens[*index] == "," {
@@ -538,6 +496,32 @@ fn parse_update_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
     } else {
         Ok(ASTNode::Update { table, values }) // Finalize and return the ASTNode::Update
     }
+}
+
+fn match_token_to_identifier(value_token: &String) -> Identifier {
+    let identifier = if value_token.starts_with('"') && value_token.ends_with('"') {
+        // Handle string literals
+        Identifier::Literal(
+            value_token[1..value_token.len() - 1].to_string(),
+            Some(DataType::String),
+        )
+    } else if is_numeric_literal(&value_token) {
+        // Handle numbers
+        Identifier::Literal(value_token.parse().unwrap(), Some(DataType::Int)) // Adjust to `Float` if decimals are needed
+    } else if is_uuid(&value_token) {
+        // Handle UUIDs
+        Identifier::Literal(value_token.to_string(), Some(DataType::UUID))
+    } else if is_datetime(&value_token) {
+        // Handle datetime literals
+        Identifier::Literal(value_token.to_string(), Some(DataType::DateTime))
+    } else if value_token.chars().any(|c| c.is_alphabetic()) {
+        // Fallback: Contains alphabets, assume string
+        Identifier::Literal(value_token.to_string(), Some(DataType::String))
+    } else {
+        // Treat anything else as a generic literal
+        Identifier::Literal(value_token.parse().unwrap(), None)
+    };
+    identifier
 }
 
 fn parse_drop_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
@@ -719,8 +703,8 @@ mod parser_tests {
                     Identifier::Name("name".to_string())
                 ],
                 values: vec![
-                    Identifier::Literal("1".to_string(), Some(DataType::Int)), // Numeric literal
-                    Identifier::Literal("John Doe".to_string(), Some(DataType::String)), // String literal
+                    Identifier::Literal("1".to_string(), Some(Int)), // Numeric literal
+                    Identifier::Literal("John Doe".to_string(), Some(String)), // String literal
                 ]
             }]
         );

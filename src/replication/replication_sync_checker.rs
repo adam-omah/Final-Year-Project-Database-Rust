@@ -17,7 +17,7 @@ use crate::replication::replication_nodes::{load_nodes, ReplicationMode, Replica
 use crate::tables::table::get_table_data;
 
 #[derive(Deserialize, Debug)]
-struct TableResponse(Vec<Vec<serde_json::Value>>);
+struct TableResponse(Vec<Vec<Value>>);
 
 #[derive(Deserialize)]
 struct TableListResponse(Vec<String>);
@@ -176,7 +176,7 @@ async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig
 
                         // Convert the TableResponse (Vec<Vec<String>>) to Vec<Value>
                         let table_values: Vec<Value> = body.0.into_iter()
-                            .map(serde_json::Value::Array)
+                            .map(Value::Array)
                             .collect();
 
                         table_data.insert(table_name.clone(), table_values);
@@ -214,7 +214,7 @@ async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig
 
                             // Convert the TableResponse (Vec<Vec<String>>) to Vec<Value>
                             let table_values: Vec<Value> = body.0.into_iter()
-                                .map(serde_json::Value::Array)
+                                .map(Value::Array)
                                 .collect();
 
                             table_data.insert(table_name.clone(), table_values);
@@ -270,10 +270,7 @@ async fn compare_node_data_and_replicate(
 
                             // Fetch logs and compare
                             let logs1 = fetch_current_logs(&app_state.config, &table_name).await?;
-                            let logs2 = match fetch_logs_from_node(other_node, &table_name).await {
-                                Ok(logs) => logs,
-                                Err(_) => Vec::new(), // Assume 0 logs if fetching fails
-                            };
+                            let logs2 = fetch_logs_from_node(other_node, &table_name).await.unwrap_or_else(|_| Vec::new());
 
                             // Identify the differing ChangeLogEntry items
                             let diff_entries = compare_logs(logs1.clone(), logs2.clone(), &table_name);
@@ -314,10 +311,7 @@ async fn compare_node_data_and_replicate(
                         warn!("Table {} not found on current node", table_name);
                         // Table exists on the other node but not on the current node
                         let logs1 = Vec::new(); // No logs to fetch from the current node
-                        let logs2 = match fetch_logs_from_node(other_node, &table_name).await {
-                            Ok(logs) => logs,
-                            Err(_) => Vec::new(), // Assume 0 logs if fetching fails
-                        };
+                        let logs2 = fetch_logs_from_node(other_node, &table_name).await.unwrap_or_else(|_| Vec::new());
 
                         // Identify the differing ChangeLogEntry items
                         let diff_entries = compare_logs(logs1.clone(), logs2.clone(), &table_name);
@@ -354,10 +348,7 @@ async fn compare_node_data_and_replicate(
 
                             // Fetch logs and compare
                             let logs1 = fetch_current_logs(&app_state.config, table_name).await?;
-                            let logs2 = match fetch_logs_from_node(other_node, table_name).await {
-                                Ok(logs) => logs,
-                                Err(_) => Vec::new(), // Assume 0 logs if fetching fails
-                            };
+                            let logs2 = fetch_logs_from_node(other_node, table_name).await.unwrap_or_else(|_| Vec::new());
 
                             // Identify the differing ChangeLogEntry items
                             let diff_entries = compare_logs(logs1.clone(), logs2.clone(), table_name);
@@ -397,10 +388,7 @@ async fn compare_node_data_and_replicate(
                         warn!("Table {} not found on current node", table_name);
                         // Table exists on the other node but not on the current node
                         let logs1 = Vec::new(); // No logs to fetch from the current node
-                        let logs2 = match fetch_logs_from_node(other_node, table_name).await {
-                            Ok(logs) => logs,
-                            Err(_) => Vec::new(), // Assume 0 logs if fetching fails
-                        };
+                        let logs2 = fetch_logs_from_node(other_node, table_name).await.unwrap_or_else(|_| Vec::new());
 
                         // Identify the differing ChangeLogEntry items
                         let diff_entries = compare_logs(logs1.clone(), logs2.clone(), table_name);
@@ -624,7 +612,7 @@ pub async fn try_perform_replication_sync(app_state: web::Data<AppState>) -> Res
         return Ok(()); // Not an error, just nothing to do
     }
 
-    // Create a reqwest client
+    // Create a request client
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()

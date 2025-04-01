@@ -64,7 +64,7 @@ impl AppState {
         };
 
         let test_cache = Arc::new(Mutex::new(BTreeMap::new()));
-        let test_change_logger = ChangeLogger::new("test_run_logs".into(), "test_run_log_file".into());
+        let test_change_logger = ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone() );
         let test_log_recovery_manager = LogRecoveryManager::new(test_config.clone());
 
         AppState {

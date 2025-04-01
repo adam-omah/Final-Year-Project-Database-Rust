@@ -47,7 +47,6 @@ pub async fn perform_replication_sync(app_state: web::Data<AppState>) -> Result<
     // 1. Load Nodes Configuration
     info!("Loading nodes config");
     let nodes_config = load_nodes(config)?;
-    debug!("Nodes config loaded: {:?}", nodes_config);
 
     if nodes_config.nodes.is_empty() {
         warn!("No nodes configured, skipping replication sync check.");
@@ -58,12 +57,8 @@ pub async fn perform_replication_sync(app_state: web::Data<AppState>) -> Result<
     for other_node in &nodes_config.nodes {
         info!("Starting replication sync check with node: {}", other_node.name);
         // 2. Fetch Data from Each Node
-        info!("Fetching current table data");
         let current_node_data = fetch_current_table_data(config).await?; // Fetch data from the current instance
-        debug!("Current node data fetched: {:?}", current_node_data);
-        info!("Fetching table data from other node");
         let other_node_data = fetch_table_data(other_node, config).await?; // Fetch data from the other node
-        debug!("Other node data fetched: {:?}", other_node_data);
 
         // 3. Compare Data and Logs, and potentially reverse direction
         compare_node_data_and_replicate(Arc::from(app_state.get_ref().clone()), other_node, &current_node_data, &other_node_data).await?;
@@ -77,17 +72,12 @@ pub async fn perform_replication_sync(app_state: web::Data<AppState>) -> Result<
 //Fetches data from the current node ( the application instance where this code runs)
 async fn fetch_current_table_data(config: &crate::DatabaseConfig) -> Result<TableData, Box<dyn std::error::Error>> {
     let mut table_data: TableData = HashMap::new();
-    debug!("Fetching current table data with config: {:?}", config);
-
     info!("Reading table directory: {}", &config.db_dir.join(&config.table_dir).display());
     for entry in std::fs::read_dir(config.db_dir.join(&config.table_dir))? {
         let entry = entry?;
         let file_name = entry.file_name().into_string().unwrap();
-        debug!("Processing file: {}", file_name);
-
         if file_name.ends_with("_initial") {
             let table_name = file_name.replace("_initial", "");
-            debug!("Extracted table name: {}", table_name);
 
             // Use get_table_data function from table.rs
             let state = AppState::global_state()
@@ -117,7 +107,6 @@ async fn fetch_current_table_data(config: &crate::DatabaseConfig) -> Result<Tabl
 
 async fn fetch_table_data(node: &ReplicationNode, config: &crate::DatabaseConfig) -> Result<TableData, Box<dyn std::error::Error>> {
     let mut table_data: TableData = HashMap::new();
-    debug!("Fetching table data for node {} with config: {:?}", node.name, config);
 
     let client = awc::Client::default();
     // Add Basic Auth headers
@@ -473,9 +462,7 @@ async fn replicate_changes_from_node(
 
 // Fetch the logs from current node (the application instance where this code runs)
 async fn fetch_current_logs(config: &crate::DatabaseConfig, table_name: &str) -> Result<Vec<ChangeLogEntry>, Box<dyn std::error::Error>> {
-    debug!("Fetching current logs with config: {:?}", config);
     let log_file_path = std::path::Path::new(&config.log_dir).join(&config.log_file);
-    info!("Log file path: {}", log_file_path.display());
     let mut entries = Vec::new();
 
     if log_file_path.exists() {
@@ -492,7 +479,6 @@ async fn fetch_current_logs(config: &crate::DatabaseConfig, table_name: &str) ->
             }
         }
     }
-    info!("Current logs fetched: {:?}", entries);
     Ok(entries)
 }
 
@@ -605,7 +591,6 @@ pub async fn try_perform_replication_sync(app_state: web::Data<AppState>) -> Res
     // 1. Load Nodes Configuration
     info!("Loading nodes config");
     let nodes_config = load_nodes(config)?;
-    debug!("Nodes config loaded: {:?}", nodes_config);
 
     if nodes_config.nodes.is_empty() {
         warn!("No nodes configured, skipping replication sync check.");
@@ -626,7 +611,6 @@ pub async fn try_perform_replication_sync(app_state: web::Data<AppState>) -> Res
         async move {
             let addrs = match node.resolve_node_url() {
                 Ok(addrs) => {
-                    debug!("Resolved {} addresses for node {}", addrs.len(), node.name);
                     addrs
                 },
                 Err(e) => {
@@ -641,7 +625,6 @@ pub async fn try_perform_replication_sync(app_state: web::Data<AppState>) -> Res
 
             let target_addr = match addrs.first() {
                 Some(addr) => {
-                    debug!("Selected target address: {}", addr);
                     addr
                 },
                 None => {
@@ -657,8 +640,6 @@ pub async fn try_perform_replication_sync(app_state: web::Data<AppState>) -> Res
             } else {
                 format!("http://{}/api/replication/sync", target_addr)
             };
-
-            debug!("Attempting sync check on node: {}", url);
 
             match client.post(&url).send().await {
                 Ok(response) => {

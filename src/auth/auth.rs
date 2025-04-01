@@ -27,43 +27,37 @@ pub struct User {
 // Simulate fetching user from the database
 async fn fetch_user_from_db(username: &str) -> Option<User> {
     // Debug logging for input
-    tracing::debug!("Attempting to fetch user with username: {}", username);
+    info!("Attempting to fetch user with username: {}", username);
 
     let query = format!("SELECT * FROM {} WHERE username = {}", USERS_TABLE, username);
 
     // Log the exact query being executed
-    tracing::debug!("Executing query: {}", query);
+    info!("Executing query: {}", query);
 
     match sql_parser(query.as_bytes()) {
         Ok(ast_nodes) => {
-            tracing::debug!("SQL parsing successful");
-
             match global_execute_query(ast_nodes).await {
                 Ok(response) => {
-                    tracing::debug!("Query execution successful");
+                    tracing::info!("Query execution successful");
 
                     match body::to_bytes(response.into_body()).await {
                         Ok(body_bytes) => {
                             // Log raw body bytes as a string
                             let body_str = String::from_utf8_lossy(&body_bytes);
-                            tracing::debug!("Response body: {}", body_str);
 
                             match serde_json::from_slice::<Vec<Vec<String>>>(&body_bytes) {
                                 Ok(result) => {
-                                    tracing::debug!("Deserialization successful. Total rows: {}", result.len());
-
                                     if result.len() >= 2 {
                                         let row = &result[1]; // Get the data row
-                                        tracing::debug!("Row data: {:?}", row);
 
                                         // NEW: Check if the row is marked for removal
                                         if row.iter().any(|cell| cell.contains("ROW_REMOVED")) {
-                                            tracing::warn!("User {} is marked as removed", username);
+                                            warn!("User {} is marked as removed", username);
                                             return None;
                                         }
 
                                         if row.len() >= 4 { // UUID, username, password_hash, auth_group
-                                            tracing::debug!("User found: {}", row[1]);
+                                            info!("User found: {}", row[1]);
                                             return Some(User {
                                                 uuid: row[0].clone(),
                                                 username: row[1].clone(),
@@ -71,21 +65,21 @@ async fn fetch_user_from_db(username: &str) -> Option<User> {
                                                 auth_group: row[3].clone(),
                                             });
                                         } else {
-                                            tracing::error!("Row doesn't have enough columns: expected at least 4, got {}", row.len());
+                                            error!("Row doesn't have enough columns: expected at least 4, got {}", row.len());
                                         }
                                     } else {
-                                        tracing::debug!("No user found: expected at least 2 rows, got {}", result.len());
+                                        error!("No user found: expected at least 2 rows, got {}", result.len());
                                     }
                                     None
                                 },
                                 Err(e) => {
-                                    tracing::error!("Failed to deserialize response body: {:?}", e);
+                                    error!("Failed to deserialize response body: {:?}", e);
                                     None
                                 }
                             }
                         }
                         Err(e) => {
-                            tracing::error!("Failed to convert body to bytes: {:?}", e);
+                            error!("Failed to convert body to bytes: {:?}", e);
                             None
                         }
                     }
@@ -198,7 +192,7 @@ async fn update_user(
     state: Data<AppState>,
     authenticated_user: User // Get the authenticated user from request
 ) -> Result<HttpResponse, Error> {
-    debug!("Updating user");
+    info!("Updating user");
     let update_request = req.into_inner();
 
     // Ensure the user exist
@@ -370,7 +364,7 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
     let query = format!("SELECT * FROM {} WHERE username = \"admin\"", USERS_TABLE);
     match sql_parser(query.as_bytes()) {
         Ok(ast_nodes) => {
-            debug!("Query: {}", query);
+            info!("Query: {}", query);
             // Use global_execute_query instead of execute_query
             match global_execute_query(ast_nodes).await {
                 Ok(response) => {
@@ -465,23 +459,6 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
         Err(e) => {
             error!("Parse error: {}", e);
             Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-        }
-    }
-}
-
-
-impl FromRequest for User {
-    type Error = Error;
-    type Future = Ready<Result<Self, Self::Error>>;
-
-    fn from_request(req: &HttpRequest, _payload: &mut actix_web::dev::Payload) -> Self::Future {
-        // Extract user from request extensions (set during basic auth)
-        let user = req.extensions().get::<User>().cloned();
-        debug!("User extracted from request: {:?}", user);
-
-        match user {
-            Some(user) => ready(Ok(user)),
-            None => ready(Err(ErrorUnauthorized("Authentication required")))
         }
     }
 }

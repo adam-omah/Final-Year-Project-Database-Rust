@@ -99,7 +99,7 @@ pub(crate) async fn try_replicate_request(
     app_state: &AppState,
     request: &QueuedReplicationRequest,
 ) -> Result<(), ReplicationError> {
-    debug!(
+    info!(
         "Attempting to replicate request: ID = {}, Entries = {}",
         request.id,
         request.request.entries.len()
@@ -115,7 +115,7 @@ pub(crate) async fn try_replicate_request(
 
     let nodes = match load_nodes(&config) {
         Ok(nodes) => {
-            debug!("Loaded {} nodes from configuration", nodes.nodes.len());
+            info!("Loaded {} nodes from configuration", nodes.nodes.len());
             nodes
         },
         Err(e) => {
@@ -134,7 +134,7 @@ pub(crate) async fn try_replicate_request(
         .cloned()
         .collect();
 
-    debug!(
+    info!(
         "Total applicable nodes for replication: {}",
         applicable_nodes.len()
     );
@@ -149,11 +149,11 @@ pub(crate) async fn try_replicate_request(
         let client = client.clone(); // reqwest::Client is Clone and Send
 
         async move {
-            debug!("Starting replication for node: {}", node.name);
+            info!("Starting replication for node: {}", node.name);
 
             let addrs = match node.resolve_node_url() {
                 Ok(addrs) => {
-                    debug!("Resolved {} addresses for node {}", addrs.len(), node.name);
+                    info!("Resolved {} addresses for node {}", addrs.len(), node.name);
                     addrs
                 },
                 Err(e) => {
@@ -168,7 +168,7 @@ pub(crate) async fn try_replicate_request(
 
             let target_addr = match addrs.first() {
                 Some(addr) => {
-                    debug!("Selected target address: {}", addr);
+                    info!("Selected target address: {}", addr);
                     addr
                 },
                 None => {
@@ -185,7 +185,7 @@ pub(crate) async fn try_replicate_request(
                 format!("http://{}/api/replication/push", target_addr)
             };
 
-            debug!(
+            info!(
                 "Replication Details - Node: {}, URL: {}, Entries: {}",
                 node.name,
                 url,
@@ -201,7 +201,7 @@ pub(crate) async fn try_replicate_request(
             match replication_result {
                 Ok(response) => {
                     if response.status().is_success() {
-                        debug!(
+                        info!(
                             "Successful replication to node {} with status {}",
                             node.name,
                             response.status()
@@ -273,7 +273,7 @@ pub async fn queue_passive_replication(
 
 
 pub async fn replication_scheduler_loop(passive_replication_interval: i64, sync_interval: u64) {
-    debug!("DIAGNOSTIC: Starting inside the async Loop Function");
+    info!("Starting inside the async Loop Function");
     let passive_interval_duration = std::time::Duration::from_secs(passive_replication_interval as u64);
     let sync_interval_duration = std::time::Duration::from_secs(sync_interval);
     let mut passive_last_tick =  Instant::now() - Duration::from_secs(5);
@@ -313,7 +313,7 @@ pub async fn replication_scheduler_loop(passive_replication_interval: i64, sync_
                     queue.get_requests().clone() // Ensure PassiveReplicationQueue implements Clone
                 };
 
-                debug!("DIAGNOSTIC: Passive replication queue size: {}, contents: {:#?}", requests.len(), requests);
+                info!("Passive replication queue size: {}, contents: {:#?}", requests.len(), requests);
                 // Process requests without holding the lock
                 for request in requests {
                     let app_state_clone = app_state.clone();
@@ -321,7 +321,7 @@ pub async fn replication_scheduler_loop(passive_replication_interval: i64, sync_
                     let request_id = request.id;
 
 
-                    debug!("DIAGNOSTIC: Passive replication request: {:#?}", request);
+                    info!("Passive replication request: {:#?}", request);
                     match try_replicate_request(&app_state_clone, &request).await {
                         Ok(_) => {
                             let mut counts = failure_counts_clone.lock().unwrap();

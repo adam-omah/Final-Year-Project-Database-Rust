@@ -6,7 +6,8 @@ use crate::schema::schema;
 use crate::schema::schema::{drop_table, get_column_names_from_schema};
 use crate::{AppState, USERS_TABLE};
 use actix_web::{post, web, HttpRequest, HttpResponse};
-use tracing::log::{debug, error, info};
+use anyhow::anyhow;
+use tracing::log::{debug, error, info, warn};
 use uuid::Uuid;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -65,34 +66,24 @@ async fn handle_select(
     where_clause: Option<Expression>,
 ) -> HttpResponse {
     info!("Handling SELECT query");
-    debug!("SELECT details: columns={:?}, table={:?}, timestamp={:?}", columns, table, timestamp);
+    info!("SELECT details: columns={:?}, table={:?}, timestamp={:?}", columns, table, timestamp);
 
     if let Identifier::Name(table_name) = table {
-        debug!("Fetching data for table: {}", table_name);
-
         // Retrieve table data
         let table_data_result = if let Some(timestamp) = timestamp {
-            debug!("Getting table at timestamp: {}", timestamp);
             get_table_at_timestamp(data.clone(), table_name, timestamp.clone()).await
         } else {
-            debug!("Getting current table data for: {}", table_name);
             get_table_data(data.clone(), table_name).await
         };
 
         // Handle table data retrieval
         match table_data_result {
             Ok(mut table_data) => {
-                debug!("Table data retrieved: {} rows", table_data.len());
-                if !table_data.is_empty() {
-                    debug!("First row sample: {:?}", table_data.first());
-                }
-
                 // If a WHERE clause exists, filter the rows based on it
                 if let Some(condition) = &where_clause {
                     info!("Evaluating WHERE clause: {:?}", condition);
                     let column_names = match get_column_names_from_schema(data, table_name) {
                         Ok(names) => {
-                            debug!("Column names from schema: {:?}", names);
                             names
                         },
                         Err(e) => {
@@ -104,22 +95,17 @@ async fn handle_select(
                     let original_count = table_data.len();
                     table_data.retain(|row| row == &column_names ||
                             evaluate_where_clause(condition, row, &column_names));
-                    debug!("After WHERE filtering: {} rows (from {})", table_data.len(), original_count);
-                    debug!("WHERE clause result: {:?}", table_data);
                 }
 
                 // Process the SELECT query
-                debug!("Processing SELECT with {} rows", table_data.len());
                 let result = process_select(columns, &table_data, data.clone(), table_name).await;
-                debug!("SELECT result: {} rows", result.len());
-
                 if result.len() <= 1 {
-                    debug!("No matching rows found in result");
+                    info!("No matching rows found in result");
                     HttpResponse::Ok().json(json!({ "message": "No matching rows found" }))
                 } else {
                     match serde_json::to_string(&result) {
                         Ok(json) => {
-                            debug!("Successfully serialized result");
+                            info!("Successfully serialized result");
                             HttpResponse::Ok().json(serde_json::from_str::<Value>(&json).unwrap())
                         },
                         Err(e) => {
@@ -550,7 +536,7 @@ fn evaluate_like_condition(left: &str, pattern: &str) -> bool {
     match Regex::new(&format!("^{}$", regex_pattern)) {
         Ok(regex) => regex.is_match(&normalized_left),
         Err(e) => {
-            debug!("Regex error: {}", e);
+            error!("Regex error: {}", e);
             false
         }
     }
@@ -564,7 +550,7 @@ fn find_column_index(column_names: &[String], col_name: &str) -> Option<usize> {
         .position(|col| col.eq_ignore_ascii_case(col_name)); // Use case-insensitive comparison
 
     if position.is_none() {
-        debug!("Column {} not found in {:?}", col_name, column_names);
+        warn!("Column {} not found in {:?}", col_name, column_names);
     }
     position
 }
@@ -572,7 +558,7 @@ fn find_column_index(column_names: &[String], col_name: &str) -> Option<usize> {
 pub async fn global_execute_query(ast_nodes: Vec<ASTNode>) -> anyhow::Result<HttpResponse> {
     // Attempt to retrieve the global app state
     let global_state = AppState::global_state()
-        .ok_or_else(|| anyhow::anyhow!("Global app state not initialized"))?;
+        .ok_or_else(|| anyhow!("Global app state not initialized"))?;
 
     // Execute the query using the global state
     let response = execute_query(
@@ -584,11 +570,11 @@ pub async fn global_execute_query(ast_nodes: Vec<ASTNode>) -> anyhow::Result<Htt
     // Log the result
     match response.status() {
         actix_web::http::StatusCode::OK => {
-            tracing::info!("Global query execution successful");
+            info!("Global query execution successful");
             Ok(response)
         },
         _ => {
-            tracing::warn!("Global query execution failed with status: {}", response.status());
+            warn!("Global query execution failed with status: {}", response.status());
             Err(anyhow::anyhow!("Query execution failed"))
         }
     }

@@ -6,7 +6,7 @@ use std::{io};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use awc::Client;
-use tracing::log::{error, info, trace};
+use tracing::log::{error, info, trace, warn};
 use crate::AppState;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 use crate::recovery::recovery::LogRecoveryManager;
@@ -424,12 +424,12 @@ async fn replication_push(
 
     match schema_comparison_result {
         Ok(true) => {
-            tracing::debug!("Proceeding with standard replication");
+            info!("Proceeding with standard replication");
             drop(current_schema);
 
             for (index, entry) in payload.entries.iter().enumerate() {
                 if let Err(e) = append_and_action_log(&app_state, entry).await {
-                    tracing::error!(
+                    error!(
                         "Failed processing replication log entry {}: {:?}",
                         index,
                         e
@@ -442,9 +442,9 @@ async fn replication_push(
 
                 if matches!(entry.change_type, ChangeType::Create | ChangeType::Drop) {
                     match refresh_schema(&app_state.config, &app_state) {
-                        Ok(_) => tracing::debug!("Schema refreshed successfully"),
+                        Ok(_) => info!("Schema refreshed successfully"),
                         Err(e) => {
-                            tracing::error!("Failed to refresh schema: {:?}", e);
+                            error!("Failed to refresh schema: {:?}", e);
                             return Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
                                 status: "failed".into(),
                                 message: Some("Unable to refresh schema".into()),
@@ -454,21 +454,21 @@ async fn replication_push(
                 }
             }
 
-            tracing::info!("Replication push completed successfully");
+            info!("Replication push completed successfully");
             Ok(HttpResponse::Ok().json(ReplicationResponse {
                 status: "success".into(),
                 message: None,
             }))
         },
         Ok(false) => {
-            tracing::warn!("Schema comparison failed");
+            warn!("Schema comparison failed");
             Ok(HttpResponse::BadRequest().json(ReplicationResponse {
                 status: "failed".into(),
                 message: Some("Schema mismatch".into()),
             }))
         },
         Err(err) => {
-            tracing::error!("Schema comparison error: {}", err);
+            error!("Schema comparison error: {}", err);
             Ok(HttpResponse::InternalServerError().json(ReplicationResponse {
                 status: "failed".into(),
                 message: Some(format!("Schema comparison error: {}", err)),
@@ -494,10 +494,6 @@ fn compare_schemas(
         .and_then(|tables| tables.as_object())
         .ok_or_else(|| "Could not extract tables from current schema".to_string())?;
 
-    // Debug logging of tables
-    tracing::debug!("Incoming Schema Tables: {}", incoming_tables.keys().cloned().collect::<Vec<_>>().join(", "));
-    tracing::debug!("Current Schema Tables: {}", current_tables.keys().cloned().collect::<Vec<_>>().join(", "));
-
     // Determine which tables to compare based on replication mode
     match replication_node {
         Some(node) => {
@@ -507,8 +503,6 @@ fn compare_schemas(
                     // Similar logic as before
                 },
                 ReplicationMode::Specific(specific_tables) => {
-                    tracing::debug!("Comparing specific tables: {}", specific_tables.join(", "));
-
                     for table_name in specific_tables {
                         // Generate both initial and updates table names
                         let initial_table_name = format!("{}_initial", table_name);
@@ -522,7 +516,7 @@ fn compare_schemas(
                             ) {
                                 (Some(incoming_table), Some(current_table)) => {
                                     if incoming_table != current_table {
-                                        tracing::warn!(
+                                        warn!(
                                             "Table {} differs. Incoming: {:?}, Current: {:?}",
                                             suffix_table_name,
                                             incoming_table,
@@ -534,21 +528,21 @@ fn compare_schemas(
                                     }
                                 },
                                 (None, Some(_)) => {
-                                    tracing::warn!(
+                                    warn!(
                                         "Table {} missing in incoming schema",
                                         suffix_table_name
                                     );
                                     false
                                 },
                                 (Some(_), None) => {
-                                    tracing::warn!(
+                                    warn!(
                                         "Table {} missing in current schema",
                                         suffix_table_name
                                     );
                                     false
                                 },
                                 (None, None) => {
-                                    tracing::warn!(
+                                    warn!(
                                         "Both {} tables are missing",
                                         suffix_table_name
                                     );
@@ -566,12 +560,12 @@ fn compare_schemas(
             }
         }
         None => {
-            tracing::warn!("No replication node configured. Schema comparison failed.");
+            warn!("No replication node configured. Schema comparison failed.");
             return Ok(false);
         }
     }
 
     // If we've made it this far, the relevant schemas match
-    tracing::info!("Schema comparison successful");
+    info!("Schema comparison successful");
     Ok(true)
 }

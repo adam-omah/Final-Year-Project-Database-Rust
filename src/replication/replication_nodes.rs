@@ -30,7 +30,7 @@ pub struct ReplicationNode {
 
 impl ReplicationNode {
     pub(crate) fn resolve_node_url(&self) -> Result<Vec<SocketAddr>, io::Error> {
-        debug!("Attempting to resolve socket addresses {}", self.node_url);
+        info!("Attempting to resolve socket addresses {}", self.node_url);
 
         // Parse the URL to extract just the host and port
         let url_str = &*self.node_url;
@@ -48,8 +48,6 @@ impl ReplicationNode {
         match socket_addr.to_socket_addrs() {
             Ok(iter) => {
                 let addresses: Vec<SocketAddr> = iter.collect();
-                debug!("Resolved socket addresses count {}", addresses.len());
-
                 if addresses.is_empty() {
                     error!("No socket addresses could be resolved {}", self.node_url);
                     Err(io::Error::new(
@@ -427,16 +425,11 @@ pub fn validate_shared_secret(
             return Err(format!("Could not load node configuration: {}", e));
         }
     };
-    debug!("Loaded nodes config: {:?}", nodes_config); // Log the loaded config
 
     // Find a node with a matching shared secret and node URL
     let valid_node = nodes_config.nodes.iter().find(|node| {
         let name_matches = node.name == replication_request.target_node.name;
         let secret_matches = node.shared_secret == replication_request.target_node.shared_secret;
-        debug!(
-            "Checking node: name match = {}, Secret match = {}",
-            name_matches, secret_matches
-        );
         name_matches && secret_matches
     });
 

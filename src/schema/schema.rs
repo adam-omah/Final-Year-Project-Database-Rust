@@ -6,7 +6,6 @@ use std::io::{BufReader, ErrorKind, Result};
 use std::sync::Arc;
 use actix_web::web;
 use actix_web::web::Data;
-use tracing::log::debug;
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
 use chrono::{NaiveDateTime, Utc};

@@ -2,10 +2,9 @@ use std::{fs, io};
 use std::fs::File;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::Path;
-use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpResponse, Responder};
 use actix_web::web::Data;
 use awc::Client;
-use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tracing::log::{debug, error, info};
 use uuid::Uuid;
@@ -346,7 +345,7 @@ async fn register_with_target_node(source_node: &ReplicationNode, app_state: Dat
     };
 
     // Send HTTP request to target node's registration endpoint
-    let mut response = client.post(&target_url)
+    let response = client.post(&target_url)
         .send_json(&request_body)
         .await
         .map_err(|e| format!("Request failed: {}", e))?;

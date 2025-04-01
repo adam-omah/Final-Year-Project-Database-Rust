@@ -5,7 +5,7 @@ use crate::tables::table::{create_table, delete_row, get_table_at_timestamp, get
 use crate::schema::schema;
 use crate::schema::schema::{drop_table, get_column_names_from_schema};
 use crate::{AppState, USERS_TABLE};
-use actix_web::{post, web, Error, HttpRequest, HttpResponse};
+use actix_web::{post, web, HttpRequest, HttpResponse};
 use tracing::log::{debug, error, info};
 use uuid::Uuid;
 use regex::Regex;
@@ -207,7 +207,7 @@ async fn handle_drop(
 
     // Acquire a lock on the schema
     let mut schema = match data.schema.lock() {
-        Ok(mut schema) => schema,
+        Ok(schema) => schema,
         Err(_) => {
             return HttpResponse::InternalServerError().json(json!({
                 "error": "Could not acquire schema lock"
@@ -633,7 +633,6 @@ async fn execute_query_endpoint(
             let sql_query = query.into_inner();
             check_for_reserved_words(&sql_query).await.unwrap();
             let query_bytes = sql_query.as_bytes();
-            let http_request = actix_web::test::TestRequest::default().to_http_request();
 
             match sql_parser(query_bytes) {
                 Ok(ast_nodes) => {

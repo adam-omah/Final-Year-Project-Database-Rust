@@ -1,24 +1,17 @@
 // auth.rs
-use actix_web::{web, error, HttpResponse, HttpRequest, Error, dev::{ServiceRequest, Service, Transform, ServiceResponse, forward_ready}, HttpMessage, body, FromRequest};
-use futures::future::{ready, LocalBoxFuture, Ready};
+use actix_web::{web, error, HttpResponse, HttpRequest, Error, HttpMessage, body, FromRequest};
+use futures::future::{ready, Ready};
 use serde::{Serialize, Deserialize};
-use crate::{schema, AppState, USERS_TABLE};
-use crate::schema::schema::{DataType, Column, Table, ConstraintType, Rule, RuleAction};
+use crate::{ AppState, USERS_TABLE};
+use crate::schema::schema::{DataType, Column, Table};
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use actix_web::body::BoxBody;
-use actix_web::error::{ErrorInternalServerError, ErrorUnauthorized};
-use actix_web::middleware::Next;
+use actix_web::error::{ ErrorUnauthorized};
 use actix_web::web::Data;
 use uuid::Uuid;
-use chrono::Utc;
 use base64::{engine::general_purpose, Engine as _};
 use tracing::log::{debug, error, info, warn};
 use crate::executer::executer::{ global_execute_query};
-use crate::query::parser::{sql_parser, ASTNode};
+use crate::query::parser::{sql_parser};
 use crate::replication::replication_nodes::load_nodes;
 use crate::tables::table::{create_table, delete_row, recalculate_table_global, update_row};
 // Import sql_parser
@@ -32,7 +25,7 @@ pub struct User {
 }
 
 // Simulate fetching user from the database
-async fn fetch_user_from_db(username: &str, state: &Data<AppState>) -> Option<User> {
+async fn fetch_user_from_db(username: &str) -> Option<User> {
     // Debug logging for input
     tracing::debug!("Attempting to fetch user with username: {}", username);
 
@@ -118,33 +111,27 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-async fn login(req: web::Json<LoginRequest>, state: web::Data<AppState>) -> Result<HttpResponse, Error> {
+async fn login(req: web::Json<LoginRequest>) -> Result<HttpResponse, Error> {
     let login_request = req.into_inner();
 
-    debug!("Login attempt for user: {}", login_request.username);
-
     // Fetch user from the database
-    debug!("Fetching user '{}' from database", login_request.username);
-    let fetched_user = fetch_user_from_db(&login_request.username, &state).await;
+    let fetched_user = fetch_user_from_db(&login_request.username).await;
 
     match &fetched_user {
         Some(u) => {
-            debug!("User '{}' found in database", login_request.username);
+            info!("User '{}' found in database", login_request.username);
 
             // Don't log the actual password hash for security reasons
             if u.password_hash == login_request.password {
                 info!("Authentication successful for user: {}", login_request.username);
-                debug!("Returning successful login response for user: {}", login_request.username);
                 Ok(HttpResponse::Ok().json(u)) // Return user info (or a session token)
             } else {
                 warn!("Failed login attempt for user: {} (password mismatch)", login_request.username);
-                debug!("Returning unauthorized response due to password mismatch");
                 Err(error::ErrorUnauthorized("Invalid credentials"))
             }
         }
         None => {
             warn!("Failed login attempt for non-existent user: {}", login_request.username);
-            debug!("Returning unauthorized response due to user not found");
             Err(error::ErrorUnauthorized("Invalid credentials"))
         }
     }
@@ -161,7 +148,7 @@ async fn create_user(req: web::Json<CreateUserRequest>, state: web::Data<AppStat
     let create_request = req.into_inner();
 
     // Check if the username already exists
-    if fetch_user_from_db(&create_request.username, &state).await.is_some() {
+    if fetch_user_from_db(&create_request.username).await.is_some() {
         return Err(error::ErrorBadRequest("Username already exists"));
     }
 
@@ -215,7 +202,7 @@ async fn update_user(
     let update_request = req.into_inner();
 
     // Ensure the user exist
-    let target_user = match fetch_user_from_db(&update_request.username, &state).await {
+    let target_user = match fetch_user_from_db(&update_request.username).await {
         Some(user) => user,
         None => return Err(error::ErrorBadRequest("User doesn't exist"))
     };
@@ -301,7 +288,7 @@ async fn delete_user(
     let delete_request = req.into_inner();
 
     // Fetch the user to be deleted
-    let target_user = match fetch_user_from_db(&delete_request.username, &state).await {
+    let target_user = match fetch_user_from_db(&delete_request.username).await {
         Some(user) => user,
         None => return Err(error::ErrorBadRequest("User doesn't exist"))
     };
@@ -502,18 +489,13 @@ impl FromRequest for User {
 // Authentication wrapper function
 pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> Result<(), Error> {
     // Log request details
-    debug!("Incoming request method: {}", req.method());
-    debug!("Request URI: {}", req.uri());
-    // Log all headers for debugging
-    for (name, value) in req.headers() {
-        debug!("Header - {}: {:?}", name, value);
-    }
+    info!("Incoming request method: {}", req.method());
     // Check for Authorization header
     match req.headers().get("Authorization") {
         Some(auth_header) => {
             match auth_header.to_str() {
                 Ok(auth_str) => {
-                    debug!("Authorization header found: {}", auth_str);
+                    info!("Authorization header found: {}", auth_str);
 
                     // Check for "Basic" authentication
                     if auth_str.starts_with("Basic ") {
@@ -527,7 +509,7 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
                                         let parts: Vec<&str> = credentials_str.split(':').collect();
                                         if parts.len() == 2 {
                                             let (username, password) = (parts[0], parts[1]);
-                                            match fetch_user_from_db(username, state).await {
+                                            match fetch_user_from_db(username).await {
                                                 Some(user) => {
                                                     if user.password_hash == password  && user.auth_group != "pending" {
                                                         info!("User authenticated: {}", username);
@@ -589,10 +571,10 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
             }
         },
         None => {
-            debug!("No Authorization header present");
+            error!("No Authorization header present");
         }
     }
-    return Err(ErrorUnauthorized("Invalid credentials"));
+    Err(ErrorUnauthorized("Invalid credentials"))
 }
 
 

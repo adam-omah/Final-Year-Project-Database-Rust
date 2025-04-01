@@ -1,22 +1,16 @@
 use std::collections::HashMap;
-use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::sync::{ Arc, Mutex};
 use std::error::Error;
-use std::{fmt, thread};
-
-use actix_web::{web, HttpResponse, HttpRequest, http, post, get, Error as ActixError, rt};
-use actix_web::rt::spawn;
+use std::{fmt};
+use actix_web::{web, HttpResponse, post, get, Error as ActixError};
 use actix_web::web::Data;
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
-use chrono::Utc;
-use futures::TryFutureExt;
-use tokio::time::{sleep, timeout, Instant};
-use tracing::log::{debug, error, info, trace, warn};
+use tokio::time::{ Instant};
+use tracing::log::{debug, error, info, warn};
 use crate::AppState;
-use crate::config::database_config::DatabaseConfig;
-use crate::replication::active_replication::{replicate_to_single_node, replicate_to_single_node_global, ReplicationRequest, ReplicationResponse};
-use crate::replication::replication_nodes::{load_nodes, ReplicationNode};
+use crate::replication::active_replication::{ ReplicationRequest };
+use crate::replication::replication_nodes::{load_nodes};
 use crate::replication::replication_sync_checker::try_perform_replication_sync;
 
 // Custom error type for replication
@@ -98,20 +92,6 @@ impl PassiveReplicationQueue {
     pub fn get_requests(&mut self) -> Vec<QueuedReplicationRequest> {
         std::mem::take(&mut self.queue) // Take ownership of the queue
     }
-}
-
-
-// Passive Replication Service
-pub struct PassiveReplicationService {
-    pub(crate) is_running: bool,
-}
-
-impl PassiveReplicationService {
-    pub fn new() -> Self {
-        Self { is_running: false }
-    }
-
-    // Start the passive replication service
 }
 
 pub(crate) async fn try_replicate_request(
@@ -334,7 +314,7 @@ pub async fn replication_scheduler_loop(passive_replication_interval: i64, sync_
 
                 debug!("DIAGNOSTIC: Passive replication queue size: {}, contents: {:#?}", requests.len(), requests);
                 // Process requests without holding the lock
-                for mut request in requests {
+                for request in requests {
                     let app_state_clone = app_state.clone();
                     let failure_counts_clone = Arc::clone(&failure_counts);
                     let request_id = request.id;

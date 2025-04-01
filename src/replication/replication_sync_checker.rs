@@ -1,5 +1,4 @@
 // replication_sync.rs
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -10,7 +9,7 @@ use base64::engine::general_purpose;
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::log::{debug, error, info, trace, warn};
-use crate::{replication, AppState};
+use crate::{ AppState};
 use crate::change_logging::change_logging::ChangeLogEntry;
 use crate::replication::active_replication::{replicate_to_single_node, ReplicationRequest};
 use crate::replication::passive_replication::ReplicationError;
@@ -271,7 +270,7 @@ async fn compare_node_data_and_replicate(
 
                             // Fetch logs and compare
                             let logs1 = fetch_current_logs(&app_state.config, &table_name).await?;
-                            let logs2 = match fetch_logs_from_node(other_node, &app_state.config, &table_name).await {
+                            let logs2 = match fetch_logs_from_node(other_node, &table_name).await {
                                 Ok(logs) => logs,
                                 Err(_) => Vec::new(), // Assume 0 logs if fetching fails
                             };
@@ -315,7 +314,7 @@ async fn compare_node_data_and_replicate(
                         warn!("Table {} not found on current node", table_name);
                         // Table exists on the other node but not on the current node
                         let logs1 = Vec::new(); // No logs to fetch from the current node
-                        let logs2 = match fetch_logs_from_node(other_node, &app_state.config, &table_name).await {
+                        let logs2 = match fetch_logs_from_node(other_node, &table_name).await {
                             Ok(logs) => logs,
                             Err(_) => Vec::new(), // Assume 0 logs if fetching fails
                         };
@@ -355,7 +354,7 @@ async fn compare_node_data_and_replicate(
 
                             // Fetch logs and compare
                             let logs1 = fetch_current_logs(&app_state.config, table_name).await?;
-                            let logs2 = match fetch_logs_from_node(other_node, &app_state.config, table_name).await {
+                            let logs2 = match fetch_logs_from_node(other_node, table_name).await {
                                 Ok(logs) => logs,
                                 Err(_) => Vec::new(), // Assume 0 logs if fetching fails
                             };
@@ -398,7 +397,7 @@ async fn compare_node_data_and_replicate(
                         warn!("Table {} not found on current node", table_name);
                         // Table exists on the other node but not on the current node
                         let logs1 = Vec::new(); // No logs to fetch from the current node
-                        let logs2 = match fetch_logs_from_node(other_node, &app_state.config, table_name).await {
+                        let logs2 = match fetch_logs_from_node(other_node, table_name).await {
                             Ok(logs) => logs,
                             Err(_) => Vec::new(), // Assume 0 logs if fetching fails
                         };
@@ -465,7 +464,7 @@ async fn replicate_changes_from_node(
 
 
     // Send a POST request to the sync endpoint
-    let mut response = client
+    let response = client
         .post(sync_url)
         .insert_header(("User-Agent", "Actix-web"))
         .insert_header(("Authorization", auth_header_value))
@@ -510,7 +509,7 @@ async fn fetch_current_logs(config: &crate::DatabaseConfig, table_name: &str) ->
 }
 
 
-async fn fetch_logs_from_node(node: &ReplicationNode, config: &crate::DatabaseConfig, table_name: &str) -> Result<Vec<ChangeLogEntry>, Box<dyn std::error::Error>> {
+async fn fetch_logs_from_node(node: &ReplicationNode, table_name: &str) -> Result<Vec<ChangeLogEntry>, Box<dyn std::error::Error>> {
     let client = awc::Client::default();
     // Format API address to correct address.
     let addrs = match node.resolve_node_url() {
@@ -579,7 +578,7 @@ fn compare_logs(logs1: Vec<ChangeLogEntry>, logs2: Vec<ChangeLogEntry>, table_na
 async fn replicate_changes_to_node(
     app_state: Arc<AppState>,
     node: &ReplicationNode,
-    mut diff_entries: Vec<ChangeLogEntry>,
+    diff_entries: Vec<ChangeLogEntry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Replicating {} changes to node {}", diff_entries.len(), node.name);
     trace!("Replicating these entries: {:?}", diff_entries); // Add trace log

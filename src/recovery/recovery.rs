@@ -1,22 +1,18 @@
-use std::collections::HashMap;
-use std::fs;
 // recovery.rs
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::{Path};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::sync::Mutex;
-use actix_web::{get, post, web, Error, HttpRequest, HttpResponse, Responder};
-use actix_web::cookie::time::format_description::well_known::iso8601::Config;
+use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
 use serde_json::{json, Value};
-use anyhow::{Result, Context, ensure};
+use anyhow::{Result, Context};
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
-use tracing::log::{debug, error, info};
+use tracing::log::{ error, info};
 use crate::AppState;
 use crate::auth::auth::authenticate_request;
 use crate::config::database_config::DatabaseConfig;
 use crate::tables::table::{get_table_data, recalculate_table, recalculate_table_global, refresh_all_tables};
-use crate::schema::schema;
-use crate::schema::schema::{global_drop_table_from_cache, global_refresh_schema, load_schema, refresh_schema, save_schema};
+use crate::schema::schema::{global_drop_table_from_cache, load_schema, refresh_schema, save_schema};
 
 #[derive(Clone)]
 pub struct LogRecoveryManager {

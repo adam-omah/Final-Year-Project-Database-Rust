@@ -12,10 +12,10 @@ use std::sync::Arc;
 use actix_web::web::Data;
 use tracing::log::{debug, error, info};
 use crate::schema::schema::{check_column_rules, is_valid_data_type, DataType};
-use chrono::{Local, NaiveDateTime, Utc};
+use chrono::{ NaiveDateTime, Utc};
 use uuid::Uuid;
 use crate::auth::auth::authenticate_request;
-use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
+use crate::change_logging::change_logging::{ ChangeType};
 use crate::replication::active_replication::replicate_change_to_nodes;
 
 pub fn create_table(table: &Table, state: &Data<AppState>) -> Result<()> {

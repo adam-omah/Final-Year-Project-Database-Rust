@@ -1,22 +1,14 @@
-
-use actix_web::{post, web, Error, HttpRequest, HttpResponse};
+use actix_web::{post, web, Error, HttpResponse};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use std::sync::Arc;
-use std::collections::HashMap;
-use std::{fs, io};
+use std::{io};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
-use actix_web::error::ErrorInternalServerError;
-use actix_web::rt::Runtime;
 use awc::Client;
-use futures::future::join_all;
 use tracing::log::{error, info, trace};
 use crate::AppState;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
-use crate::config::database_config::DatabaseConfig;
-use crate::tables::table::recalculate_table_global;
 use crate::recovery::recovery::LogRecoveryManager;
 use crate::replication::passive_replication::{get_replication_queue_status, queue_passive_replication, ReplicationError};
 use crate::replication::replication_nodes::{load_nodes, validate_shared_secret, ReplicationMode, ReplicationNode};

@@ -1,37 +1,27 @@
-use actix_web::{ web, App, HttpRequest, HttpServer, Responder};
-use std::collections::{BTreeMap, HashMap};
-use std::{env, thread};
-use std::error::Error;
-use std::fmt::Debug;
+use actix_web::{ web, App, HttpServer};
+use std::collections::{BTreeMap};
 use actix_files::Files;
 use std::io::{Result};
 use std::string::String;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use std::thread::sleep;
-use actix_web::rt::time::Instant;
-use actix_web::web::Data;
-use chrono::Duration;
+use std::sync::{ Arc, Mutex, OnceLock};
 use tokio::spawn;
-use tracing::log::{debug, error, info};
+use tracing::log::{ error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use uuid::Uuid;
 use crate::executer::executer::execute_query_endpoint;
 use crate::config::database_config::DatabaseConfig;
-use crate::tables::table::{create_table, get_column_names_api, get_table_api, get_table_at_timestamp_api, list_tables_api};
+use crate::tables::table::{ get_column_names_api, get_table_api, get_table_at_timestamp_api, list_tables_api};
 use schema::{
     schema::load_schema,
     schema::Schema,
 };
 use crate::auth::auth::{ configure_auth_routes, create_default_user};
 use crate::change_logging::change_logging::{configure_logging_routes, ChangeLogger};
-use crate::query::parser::sql_parser;
-use crate::recovery::recovery::{configure_recovery_routes, trigger_log_recovery, trigger_specific_table_recovery, LogRecoveryManager};
+use crate::recovery::recovery::{configure_recovery_routes, LogRecoveryManager};
 use crate::replication::active_replication::configure_replication_routes;
-use crate::replication::passive_replication::{replication_scheduler_loop, try_replicate_request, PassiveReplicationQueue, PassiveReplicationService};
+use crate::replication::passive_replication::{replication_scheduler_loop, PassiveReplicationQueue };
 use crate::replication::replication_nodes::configure_node_routes;
-use crate::replication::replication_sync_checker::{configure_sync_routes, perform_replication_sync, trigger_replication_sync, try_perform_replication_sync};
-use crate::schema::schema::{Column, DataType};
+use crate::replication::replication_sync_checker::{configure_sync_routes};
 
 // Module Imports.
 pub mod config;
@@ -60,7 +50,6 @@ pub struct AppState {
     pub change_logger: ChangeLogger,
     pub log_recovery_manager: LogRecoveryManager,
     pub passive_replication_queue: Arc<Mutex<PassiveReplicationQueue>>,
-    pub passive_replication_service: Arc<Mutex<PassiveReplicationService>>,
 }
 
 static GLOBAL_APP_STATE: OnceLock<Arc<Mutex<Option<AppState>>>> = OnceLock::new();
@@ -81,7 +70,6 @@ impl AppState {
             change_logger,
             log_recovery_manager,
             passive_replication_queue: Arc::new(Mutex::new(PassiveReplicationQueue::default())),
-            passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         };
 
         app_state
@@ -305,7 +293,6 @@ mod app_tests {
             change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
             log_recovery_manager: log_recovery_manager.clone(),
             passive_replication_queue: Arc::new(Mutex::new(Default::default())),
-            passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         });
 
         if !schema.lock().unwrap().tables.contains_key("users") {
@@ -386,7 +373,6 @@ mod app_tests {
             change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
             log_recovery_manager: log_recovery_manager.clone(),
             passive_replication_queue: Arc::new(Mutex::new(Default::default())),
-            passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         });
 
         // Initialize Actix Web app
@@ -446,7 +432,6 @@ mod app_tests {
             change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
             log_recovery_manager: log_recovery_manager.clone(),
             passive_replication_queue: Arc::new(Mutex::new(Default::default())),
-            passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         });
 
         let app = test::init_service(
@@ -491,7 +476,6 @@ mod app_tests {
             change_logger: ChangeLogger::new(test_config.log_dir.clone(), test_config.log_file.clone()),
             log_recovery_manager: log_recovery_manager.clone(),
             passive_replication_queue: Arc::new(Mutex::new(Default::default())),
-            passive_replication_service: Arc::new(Mutex::new(PassiveReplicationService::new())),
         });
 
         let app = test::init_service(

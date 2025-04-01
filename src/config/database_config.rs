@@ -3,7 +3,6 @@ use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
-use tracing::log::info;
 use crate::{DB_DIR, SCHEMA_FILE, TABLE_DIR};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

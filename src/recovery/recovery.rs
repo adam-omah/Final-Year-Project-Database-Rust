@@ -53,8 +53,6 @@ impl LogRecoveryManager {
 
     /// Read log entries from the file
     fn read_log_entries(&self) -> Result<Vec<Value>> {
-        let file_location = self.config.log_dir.join(&self.config.log_file);
-        info!("Reading log file: {}", file_location.display());
         let file = File::open(self.config.log_dir.join(&self.config.log_file))
             .context("Failed to open log file")?;
 
@@ -89,7 +87,6 @@ impl LogRecoveryManager {
             self.config.table_dir.display(),
             table_name
         );
-        info!("Initial table path: {}", initial_table_path);
 
         let updates_table_path = format!(
             "{}/{}/{}_updates",
@@ -134,7 +131,6 @@ impl LogRecoveryManager {
     pub(crate) fn handle_table_creation(&self, initial_table_path: &str, updates_table_path: &str, log: &Value) -> Result<()> {
         // Construct schema file path
         let schema_file_path = Path::new(&self.config.db_dir).join(&self.config.schema_file);
-        info!("Log given {}", log);
         // Read existing schema or create a new one if not exists
         let mut schema: Value = if schema_file_path.exists() {
             serde_json::from_str(&fs::read_to_string(&schema_file_path)?)?
@@ -167,7 +163,6 @@ impl LogRecoveryManager {
 
         // Add columns from log
         if let Some(log_columns) = log["data"]["table_definition"]["columns"].as_array() {
-            info!("Log columns {:?}", log_columns);
             columns.extend(log_columns.iter().cloned());
         }
 
@@ -193,7 +188,7 @@ impl LogRecoveryManager {
             // Compare existing schema with new schema
             let existing_schema = schema["tables"][initial_table_name]["columns"].clone();
             if existing_schema != json!(columns) {
-                tracing::info!("Updating schema for table {}: existing schema differs from recovery schema",initial_table_name);
+                info!("Updating schema for table {}: existing schema differs from recovery schema",initial_table_name);
                 // Update the existing schema to match the new columns
                 schema["tables"][initial_table_name]["columns"] = json!(columns);
             }
@@ -226,7 +221,6 @@ impl LogRecoveryManager {
             }
             // Open existing table file or create a new one if it doesn't exist
             OpenOptions::new().create(true).write(true).open(table_path)?;
-            info!("Verified existence of table file at {:?}", &table_path);
         }
         Ok(())
     }
@@ -236,8 +230,6 @@ impl LogRecoveryManager {
                                              initial_table_path: &str,
                                              log: &Value
     ) -> Result<()> {
-        info!("Log given to insert: {}", log);
-        info!("row data: {}", log["data"]["row_data"]);
         // Get row data
         let row_data = log["data"]["row_data"].as_array()
             .context("Invalid row data")?;
@@ -512,8 +504,6 @@ impl LogRecoveryManager {
     }
 
     pub async fn recalculate_after_change(&self, table_name: &str) -> Result<()> {
-        info!("Recalculating table {} after applying changes", table_name);
-
         // Use actix-web runtime to handle the async operation
         let table_name_owned = table_name.to_string();
 

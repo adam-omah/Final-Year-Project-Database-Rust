@@ -18,13 +18,11 @@ pub async fn execute_query(
     ast_nodes: Vec<ASTNode>,
     data: web::Data<AppState>,
 ) -> HttpResponse {
-    info!("Executing query with {} AST nodes", ast_nodes.len());
     let mut where_clause: Option<Expression> = None;
 
     // Iterate through AST nodes to extract the WHERE clause (if any)
     for ast_node in ast_nodes.iter() {
         if let ASTNode::Where { condition } = ast_node {
-            info!("Found WHERE clause: {:?}", condition);
             where_clause = Some(condition.clone());
             break; // Extract only the first WHERE clause
         }
@@ -65,9 +63,6 @@ async fn handle_select(
     data: &web::Data<AppState>,
     where_clause: Option<Expression>,
 ) -> HttpResponse {
-    info!("Handling SELECT query");
-    info!("SELECT details: columns={:?}, table={:?}, timestamp={:?}", columns, table, timestamp);
-
     if let Identifier::Name(table_name) = table {
         // Retrieve table data
         let table_data_result = if let Some(timestamp) = timestamp {
@@ -81,7 +76,6 @@ async fn handle_select(
             Ok(mut table_data) => {
                 // If a WHERE clause exists, filter the rows based on it
                 if let Some(condition) = &where_clause {
-                    info!("Evaluating WHERE clause: {:?}", condition);
                     let column_names = match get_column_names_from_schema(data, table_name) {
                         Ok(names) => {
                             names
@@ -103,7 +97,6 @@ async fn handle_select(
                 } else {
                     match serde_json::to_string(&result) {
                         Ok(json) => {
-                            info!("Successfully serialized result");
                             HttpResponse::Ok().json(serde_json::from_str::<Value>(&json).unwrap())
                         },
                         Err(e) => {
@@ -340,15 +333,11 @@ async fn handle_update(
         match load_table_data_from_file(&initial_table_path) {
             Ok(initial_data) => {
                 let column_names = get_column_names_from_schema(data, table_name).unwrap_or_default();
-                info!("initial_data: {:?}", initial_data);
-
                 // Filter rows based on the WHERE clause
                 let filtered_rows: Vec<_> = initial_data
                     .iter()
                     .filter(|row| evaluate_where_clause(condition, row, &column_names))
                     .collect();
-
-                info!("Filtered rows: {:?}", filtered_rows);
 
                 if filtered_rows.is_empty() {
                     return HttpResponse::NotFound().json(json!({"error": "No rows matched the specified condition"}));
@@ -485,7 +474,6 @@ pub fn evaluate_where_clause(
             left_val = left_val.trim_matches('"').to_string();
             right_val = right_val.trim_matches('"').to_string();
 
-            info!("Evaluating where clause: {} {} {}", left_val, operator, right_val);
 
             // Perform evaluation based on the operator
             match operator.as_str() {
@@ -563,12 +551,10 @@ pub async fn global_execute_query(ast_nodes: Vec<ASTNode>) -> anyhow::Result<Htt
         ast_nodes,
         web::Data::from(global_state)
     ).await;
-    info!("Global query execution result: {:?}", response);
 
     // Log the result
     match response.status() {
         actix_web::http::StatusCode::OK => {
-            info!("Global query execution successful");
             Ok(response)
         },
         _ => {

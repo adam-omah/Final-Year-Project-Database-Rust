@@ -152,8 +152,6 @@ pub async fn get_logs_for_table(
     app_state: web::Data<AppState>,
 ) -> impl Responder {
     let table_name = table_name.into_inner();
-    info!("Fetching logs for table: {}", table_name);
-
     let change_logger = ChangeLogger::new(&app_state.config.log_dir, app_state.config.log_file.clone());
 
     match change_logger.read_logs_for_table(&table_name, 1000) { // Adjust limit as needed

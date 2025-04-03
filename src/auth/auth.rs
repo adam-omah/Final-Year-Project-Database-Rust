@@ -25,20 +25,12 @@ pub struct User {
 
 // Simulate fetching user from the database
 async fn fetch_user_from_db(username: &str) -> Option<User> {
-    // Debug logging for input
-    info!("Attempting to fetch user with username: {}", username);
-
     let query = format!("SELECT * FROM {} WHERE username = {}", USERS_TABLE, username);
-
     // Log the exact query being executed
-    info!("Executing query: {}", query);
-
     match sql_parser(query.as_bytes()) {
         Ok(ast_nodes) => {
             match global_execute_query(ast_nodes).await {
                 Ok(response) => {
-                    tracing::info!("Query execution successful");
-
                     match body::to_bytes(response.into_body()).await {
                         Ok(body_bytes) => {
                             match serde_json::from_slice::<Vec<Vec<String>>>(&body_bytes) {
@@ -53,7 +45,6 @@ async fn fetch_user_from_db(username: &str) -> Option<User> {
                                         }
 
                                         if row.len() >= 4 { // UUID, username, password_hash, auth_group
-                                            info!("User found: {}", row[1]);
                                             return Some(User {
                                                 uuid: row[0].clone(),
                                                 username: row[1].clone(),
@@ -81,13 +72,13 @@ async fn fetch_user_from_db(username: &str) -> Option<User> {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Global query execution error: {}", e);
+                    error!("Global query execution error: {}", e);
                     None
                 }
             }
         }
         Err(e) => {
-            tracing::error!("Parse error: {}", e);
+            error!("Parse error: {}", e);
             None
         }
     }
@@ -109,11 +100,8 @@ async fn login(req: web::Json<LoginRequest>) -> Result<HttpResponse, Error> {
 
     match &fetched_user {
         Some(u) => {
-            info!("User '{}' found in database", login_request.username);
-
             // Don't log the actual password hash for security reasons
             if u.password_hash == login_request.password {
-                info!("Authentication successful for user: {}", login_request.username);
                 Ok(HttpResponse::Ok().json(u)) // Return user info (or a session token)
             } else {
                 warn!("Failed login attempt for user: {} (password mismatch)", login_request.username);
@@ -360,7 +348,6 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
     let query = format!("SELECT * FROM {} WHERE username = \"admin\"", USERS_TABLE);
     match sql_parser(query.as_bytes()) {
         Ok(ast_nodes) => {
-            info!("Query: {}", query);
             // Use global_execute_query instead of execute_query
             match global_execute_query(ast_nodes).await {
                 Ok(response) => {
@@ -368,9 +355,6 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
                         // Rest of the existing code remains the same
                         match body::to_bytes(response.into_body()).await {
                             Ok(body_bytes) => {
-                                let body_str = String::from_utf8_lossy(&body_bytes);
-                                info!("Response body: {}", body_str);
-
                                 // Parse the JSON response
                                 match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                                     Ok(json_response) => {
@@ -385,7 +369,6 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
 
                                                 match sql_parser(insert_query_bytes) {
                                                     Ok(insert_ast_nodes) => {
-                                                        info!("Inserting default admin user");
                                                         match global_execute_query(insert_ast_nodes).await {
                                                             Ok(insert_response) => {
                                                                 if insert_response.status() == actix_web::http::StatusCode::OK {
@@ -461,15 +444,11 @@ pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
 
 // Authentication wrapper function
 pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> Result<(), Error> {
-    // Log request details
-    info!("Incoming request method: {}", req.method());
     // Check for Authorization header
     match req.headers().get("Authorization") {
         Some(auth_header) => {
             match auth_header.to_str() {
                 Ok(auth_str) => {
-                    info!("Authorization header found: {}", auth_str);
-
                     // Check for "Basic" authentication
                     if auth_str.starts_with("Basic ") {
                         let encoded_credentials = &auth_str[6..];
@@ -485,7 +464,6 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
                                             match fetch_user_from_db(username).await {
                                                 Some(user) => {
                                                     if user.password_hash == password  && user.auth_group != "pending" {
-                                                        info!("User authenticated: {}", username);
                                                         req.extensions_mut().insert(user);
                                                         return Ok(()); // Successful user authentication
                                                     } else {
@@ -522,12 +500,11 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
                             Err(_) => return Err(ErrorUnauthorized("Could not load node configuration")),
                         };
 
-                        if let Some(node) = nodes_config.nodes.iter().find(|node| {
+                        if let Some(_node) = nodes_config.nodes.iter().find(|node| {
                             let credentials = format!("{}:{}", node.name, node.shared_secret);
                             let encoded_credentials = general_purpose::STANDARD.encode(credentials);
                             format!("Basic {}", encoded_credentials) == auth_str
                         }) {
-                            info!("Replication node authenticated: {}", node.name);
                             // Add any specific logic for handling authenticated replication nodes here.
                             return Ok(());
                         } else {

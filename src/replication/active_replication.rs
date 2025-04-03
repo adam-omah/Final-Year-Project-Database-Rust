@@ -6,7 +6,7 @@ use std::{io};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use awc::Client;
-use tracing::log::{error, info, trace, warn};
+use tracing::log::{error, info, warn};
 use crate::AppState;
 use crate::change_logging::change_logging::{ChangeLogEntry, ChangeType};
 use crate::recovery::recovery::LogRecoveryManager;
@@ -179,7 +179,7 @@ pub async fn replicate_to_single_node(
     };
     info!("Replication Node: {:#?}", node);
     info!("Replicating to URL: {}", url);
-    trace!("Replication request: {:?}", request);
+    info!("Replication request: {:?}", request);
 
     // Now use target_addr for awc requests
     let mut response = client
@@ -189,7 +189,7 @@ pub async fn replicate_to_single_node(
 
     if response.status().is_success() {
         let repl_response: ReplicationResponse = response.json().await?;
-        trace!("Replication response: {:?}", repl_response); // Add trace log for the response
+        info!("Replication response: {:?}", repl_response);
         Ok(repl_response.status == "success" || repl_response.status == "force_success") // Modified line
     } else {
         error!("HTTP error: {}", response.status()); // Add error log

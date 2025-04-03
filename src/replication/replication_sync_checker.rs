@@ -8,7 +8,7 @@ use base64::Engine;
 use base64::engine::general_purpose;
 use serde::Deserialize;
 use serde_json::Value;
-use tracing::log::{error, info, trace, warn};
+use tracing::log::{error, info, warn};
 use crate::{ AppState};
 use crate::change_logging::change_logging::ChangeLogEntry;
 use crate::replication::active_replication::{replicate_to_single_node, ReplicationRequest};
@@ -101,7 +101,6 @@ async fn fetch_current_table_data(config: &crate::DatabaseConfig) -> Result<Tabl
             }
         }
     }
-    info!("Current table data fetched: {:?}", table_data);
     Ok(table_data)
 }
 
@@ -112,10 +111,7 @@ async fn fetch_table_data(node: &ReplicationNode) -> Result<TableData, Box<dyn s
     // Add Basic Auth headers
     let credentials = format!("{}:{}", node.name, node.shared_secret); // Combine node_name and shared_secret
     let encoded_credentials = general_purpose::STANDARD.encode(credentials);
-    info!("Encoded credentials: {}", encoded_credentials); // Log for debugging
-
     let auth_header_value = format!("Basic {}", encoded_credentials);
-    info!("Authorization header value: {}", auth_header_value);
     // Format API address to correct address.
     let addrs = match node.resolve_node_url() {
         Ok(addrs) => addrs,
@@ -133,8 +129,6 @@ async fn fetch_table_data(node: &ReplicationNode) -> Result<TableData, Box<dyn s
             } else {
                 format!("http://{}/api/tables", target_addr)
             };
-            info!("Replication Mode ALL is enabled, fetching all tables");
-            info!("Fetching table list from: {}", tables_url);
 
             let mut table_list_response = client.get(tables_url)
                 .insert_header(("User-Agent", "Actix-web"))
@@ -144,7 +138,6 @@ async fn fetch_table_data(node: &ReplicationNode) -> Result<TableData, Box<dyn s
 
             if table_list_response.status().is_success() {
                 let table_list = table_list_response.json::<TableListResponse>().await?;
-                info!("Fetched table list: {:?}", table_list.0);
 
                 // loop tables and get the data
                 for table_name in table_list.0 {
@@ -153,7 +146,6 @@ async fn fetch_table_data(node: &ReplicationNode) -> Result<TableData, Box<dyn s
                     } else {
                         format!("http://{}/api/tables/{}", target_addr, table_name)
                     };
-                    info!("Fetching table data from: {}", table_url);
 
                     let mut response = client.get(table_url)
                         .insert_header(("User-Agent", "Actix-web"))
@@ -180,7 +172,6 @@ async fn fetch_table_data(node: &ReplicationNode) -> Result<TableData, Box<dyn s
             }
         }
         ReplicationMode::Specific(specific_tables) => {
-            info!("Fetching specific tables: {}", specific_tables.join(", "));
             let client = awc::Client::default();
 
             for table_name in specific_tables {
@@ -189,7 +180,6 @@ async fn fetch_table_data(node: &ReplicationNode) -> Result<TableData, Box<dyn s
                 } else {
                     format!("http://{}/api/tables/{}", target_addr, table_name)
                 };
-                info!("Fetching table data from: {}", table_url);
 
                 let response = client.get(table_url)
                     .insert_header(("User-Agent", "Actix-web"))
@@ -213,14 +203,13 @@ async fn fetch_table_data(node: &ReplicationNode) -> Result<TableData, Box<dyn s
                         }
                     }
                     Err(e) => {
-                        info!("Failed to send request to {}: {}", node.node_url, e);
+                        error!("Failed to send request to {}: {}", node.node_url, e);
                         return Err(format!("Failed to fetch table list: {}", e).into());
                     }
                 }
             }
         }
     }
-    info!("Table data fetched: {:?}", table_data);
     Ok(table_data)
 }
 
@@ -555,7 +544,7 @@ async fn replicate_changes_to_node(
     diff_entries: Vec<ChangeLogEntry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Replicating {} changes to node {}", diff_entries.len(), node.name);
-    trace!("Replicating these entries: {:?}", diff_entries); // Add trace log
+    info!("Replicating these entries: {:?}", diff_entries);
 
     // Create a ReplicationRequest
     let replication_request = ReplicationRequest {
@@ -564,7 +553,7 @@ async fn replicate_changes_to_node(
         target_node: node.clone(), // Assuming ReplicationNode is Clone
     };
 
-    trace!("Replication request {:#?}", replication_request); // Add trace log
+    info!("Replication request {:#?}", replication_request);
 
     // Use the replicate_to_single_node function
     let client = awc::Client::default();
@@ -589,7 +578,6 @@ pub async fn try_perform_replication_sync(app_state: web::Data<AppState>) -> Res
     let config = &app_state.config;
 
     // 1. Load Nodes Configuration
-    info!("Loading nodes config");
     let nodes_config = load_nodes(config)?;
 
     if nodes_config.nodes.is_empty() {

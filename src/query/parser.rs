@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::str;
-use tracing::log::info;
 use uuid::Uuid;
 use crate::schema::schema::{DataType};
 
@@ -374,15 +373,12 @@ fn parse_insert_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
         *index += 1;
         if *index < tokens.len() {
             let table = Identifier::Name(tokens[*index].to_string());
-            info!("Table parsed: {:?}", table);
             *index += 1;
-
             let mut columns = Vec::new();
             if *index < tokens.len() && tokens[*index] == "(" {
                 *index += 1;
                 while *index < tokens.len() && tokens[*index] != ")" {
                     columns.push(Identifier::Name(tokens[*index].to_string()));
-                    info!("Column parsed: {:?}", tokens[*index]);
                     *index += 1;
                     if *index < tokens.len() && tokens[*index] == "," {
                         *index += 1;

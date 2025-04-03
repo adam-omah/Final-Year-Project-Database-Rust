@@ -203,7 +203,6 @@ pub async fn update_row(
 
     // Check if UUID exists in the current table state
     let current_data = get_table_data(state.clone(), table_name).await?;
-    info!("Current data: {:#?}", current_data);
 
     let row_index = current_data
         .iter()

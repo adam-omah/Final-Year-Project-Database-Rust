@@ -7,7 +7,7 @@ use actix_web::{get, post, web, HttpResponse, Responder};
 use actix_web::web::Data;
 use awc::Client;
 use serde::{Deserialize, Serialize};
-use tracing::log::{error, info};
+use tracing::log::{error};
 use uuid::Uuid;
 use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
@@ -30,8 +30,6 @@ pub struct ReplicationNode {
 
 impl ReplicationNode {
     pub(crate) fn resolve_node_url(&self) -> Result<Vec<SocketAddr>, io::Error> {
-        info!("Attempting to resolve socket addresses {}", self.node_url);
-
         // Parse the URL to extract just the host and port
         let url_str = &*self.node_url;
         let socket_addr = if url_str.starts_with("http://") || url_str.starts_with("https://") {
@@ -131,10 +129,8 @@ fn generate_shared_secret() -> String {
 
 pub fn load_nodes(config: &DatabaseConfig) -> io::Result<NodesConfig> {
     let path = Path::new(&config.log_dir).join(&config.repl_node_file);
-    info!("Loading replication nodes from: {}", path.display());
     if path.exists() {
         let file = File::open(path)?;
-        info!("Loaded replication nodes from path ");
         serde_json::from_reader(file).map_err(|e|
             io::Error::new(io::ErrorKind::InvalidData, format!("JSON parsing failed: {}", e))
         )
@@ -434,8 +430,7 @@ pub fn validate_shared_secret(
     });
 
     match valid_node {
-        Some(node) => {
-            info!("Valid shared secret for replication request from node: {:?}", node); // Log the validated node
+        Some(_node) => {
             Ok(())
         },
         None => {

@@ -32,7 +32,7 @@ docker build -t final-year-project-database-rust .
 
 Run Container on Local Host (Change Port Bindings if config is changed):
 ``
-docker run -p 8080:8080 final-year-project-database-rust
+docker run --name my-rust-database-8080 -p 8080:8080 final-year-project-database-rust
 ``
 
 Docker Run with custom container name:

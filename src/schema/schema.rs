@@ -10,6 +10,7 @@ use crate::AppState;
 use crate::config::database_config::DatabaseConfig;
 use chrono::{NaiveDateTime, Utc};
 use regex::Regex;
+use tracing::log::info;
 use crate::change_logging::change_logging::{ChangeLogger, ChangeType};
 use crate::executer::executer::evaluate_where_clause;
 use crate::query::parser::{Expression, Identifier};
@@ -217,7 +218,7 @@ pub fn global_refresh_schema() -> anyhow::Result<()> {
     // Replace the contents of the existing schema
     *current_schema = new_schema;
 
-    tracing::info!("Schema refreshed globally");
+    info!("Schema refreshed globally");
     Ok(())
 }
 
@@ -486,7 +487,7 @@ pub fn global_drop_table_from_cache(table_name: String) -> anyhow::Result<()> {
         &web::Data::from(global_state)
     ).map_err(|e| anyhow::anyhow!(e))?;
 
-    tracing::info!("Table dropped from global cache");
+    info!("Table dropped from global cache");
     Ok(())
 }
 

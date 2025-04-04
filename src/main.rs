@@ -4,6 +4,7 @@ use actix_files::Files;
 use std::io::{Result};
 use std::string::String;
 use std::sync::{ Arc, Mutex, OnceLock};
+use dashmap::DashMap;
 use tokio::spawn;
 use tracing::log::{ error, info};
 use tracing_subscriber::layer::SubscriberExt;
@@ -15,7 +16,7 @@ use schema::{
     schema::load_schema,
     schema::Schema,
 };
-use crate::auth::auth::{ configure_auth_routes, create_default_user};
+use crate::auth::auth::{configure_auth_routes, create_default_user, User};
 use crate::change_logging::change_logging::{configure_logging_routes, ChangeLogger};
 use crate::recovery::recovery::{configure_recovery_routes, LogRecoveryManager};
 use crate::replication::active_replication::configure_replication_routes;
@@ -50,6 +51,7 @@ pub struct AppState {
     pub change_logger: ChangeLogger,
     pub log_recovery_manager: LogRecoveryManager,
     pub passive_replication_queue: Arc<Mutex<PassiveReplicationQueue>>,
+    pub user_cache: DashMap<String, User>,
 }
 
 impl AppState {
@@ -76,6 +78,7 @@ impl AppState {
             change_logger: test_change_logger,
             log_recovery_manager: test_log_recovery_manager,
             passive_replication_queue: Arc::new(Mutex::new(PassiveReplicationQueue::default())),
+            user_cache: DashMap::new(),
         }
     }
 }
@@ -90,8 +93,8 @@ impl AppState {
         cache: Arc<Mutex<BTreeMap<String, Vec<Vec<String>>>>>,
         change_logger: ChangeLogger,
         log_recovery_manager: LogRecoveryManager,
+        user_cache: DashMap<String, User>,
     ) -> Self {
-        
 
         Self {
             schema: schema.clone(),
@@ -100,6 +103,7 @@ impl AppState {
             change_logger,
             log_recovery_manager,
             passive_replication_queue: Arc::new(Mutex::new(PassiveReplicationQueue::default())),
+            user_cache,
         }
     }
     pub fn set_global_state(self) {
@@ -163,7 +167,8 @@ async fn main() -> Result<()> {
         config.clone(),
         Arc::new(Mutex::new(BTreeMap::new())),
         ChangeLogger::new(config.log_dir.clone(), config.log_file.clone()),
-        log_recovery_manager
+        log_recovery_manager,
+        DashMap::new(),
     );
 
     // Set as global state

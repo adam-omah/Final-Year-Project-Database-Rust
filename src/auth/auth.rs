@@ -24,61 +24,69 @@ pub struct User {
 }
 
 // Simulate fetching user from the database
+// auth.rs - Keep this function exactly as you provided it earlier
 async fn fetch_user_from_db(username: &str) -> Option<User> {
-    let query = format!("SELECT * FROM {} WHERE username = {}", USERS_TABLE, username);
-    // Log the exact query being executed
+    let query = format!("SELECT * FROM {} WHERE username = {}", USERS_TABLE, username); // Ensure quotes match expected parser logic
     match sql_parser(query.as_bytes()) {
         Ok(ast_nodes) => {
             match global_execute_query(ast_nodes).await {
                 Ok(response) => {
-                    match body::to_bytes(response.into_body()).await {
-                        Ok(body_bytes) => {
-                            match serde_json::from_slice::<Vec<Vec<String>>>(&body_bytes) {
-                                Ok(result) => {
-                                    if result.len() >= 2 {
-                                        let row = &result[1]; // Get the data row
-
-                                        // NEW: Check if the row is marked for removal
-                                        if row.iter().any(|cell| cell.contains("ROW_REMOVED")) {
-                                            warn!("User {} is marked as removed", username);
-                                            return None;
-                                        }
-
-                                        if row.len() >= 4 { // UUID, username, password_hash, auth_group
-                                            return Some(User {
-                                                uuid: row[0].clone(),
-                                                username: row[1].clone(),
-                                                password_hash: row[2].clone(),
-                                                auth_group: row[3].clone(),
-                                            });
+                    let status = response.status(); // Check status
+                    if status.is_success() {
+                        match body::to_bytes(response.into_body()).await {
+                            Ok(body_bytes) => {
+                                // Expecting Vec<Vec<String>>: [[header], [data...]] or [[header]] or []
+                                match serde_json::from_slice::<Vec<Vec<String>>>(&body_bytes) {
+                                    Ok(result) => {
+                                        // Check for header + data row
+                                        if result.len() > 1 {
+                                            let row = &result[1]; // First data row
+                                            // Optional: Check for removal marker if needed
+                                            if row.iter().any(|cell| cell.contains("ROW_REMOVED")) {
+                                                warn!("DB Fetch: User {} is marked as removed", username);
+                                                return None;
+                                            }
+                                            // Check column count (assuming id, user, pass, group)
+                                            if row.len() >= 4 {
+                                                return Some(User {
+                                                    uuid: row[0].clone(),
+                                                    username: row[1].clone(),
+                                                    password_hash: row[2].clone(),
+                                                    auth_group: row[3].clone(),
+                                                });
+                                            } else {
+                                                error!("DB Fetch: Row for user '{}' doesn't have enough columns: expected >= 4, got {}. Row: {:?}", username, row.len(), row);
+                                            }
                                         } else {
-                                            error!("Row doesn't have enough columns: expected at least 4, got {}", row.len());
+                                            info!("DB Fetch: User '{}' not found (result len <= 1)", username);
                                         }
-                                    } else {
-                                        error!("No user found: expected at least 2 rows, got {}", result.len());
+                                        None // No data row found
+                                    },
+                                    Err(e) => {
+                                        error!("DB Fetch: Failed to deserialize response body for user '{}': {:?}. Body: {}", username, e, String::from_utf8_lossy(&body_bytes));
+                                        None
                                     }
-                                    None
-                                },
-                                Err(e) => {
-                                    error!("Failed to deserialize response body: {:?}", e);
-                                    None
                                 }
                             }
+                            Err(e) => {
+                                error!("DB Fetch: Failed to convert body to bytes for user '{}': {:?}", username, e);
+                                None
+                            }
                         }
-                        Err(e) => {
-                            error!("Failed to convert body to bytes: {:?}", e);
-                            None
-                        }
+                    } else {
+                        error!("DB Fetch: Query execution failed for user '{}' with status: {}", username, status);
+                        // Optionally log error body here if needed
+                        None
                     }
                 }
                 Err(e) => {
-                    error!("Global query execution error: {}", e);
+                    error!("DB Fetch: Global query execution error for user '{}': {}", username, e);
                     None
                 }
             }
         }
         Err(e) => {
-            error!("Parse error: {}", e);
+            error!("DB Fetch: Parse error for user '{}' query: {}", username, e);
             None
         }
     }
@@ -227,6 +235,10 @@ async fn update_user(
         &state
     ).await;
 
+    info!("Successfully updated user '{}' in database.", update_request.username);
+    info!("Auth Cache: Removing entry for updated user '{}'.", update_request.username);
+    state.user_cache.remove(&update_request.username);
+
     actix_web::rt::spawn(async move {
         match recalculate_table_global(USERS_TABLE).await {
             Ok(_) => {
@@ -291,6 +303,10 @@ async fn delete_user(
         target_user.username,
         target_user.uuid
     );
+
+    info!("Successfully Deleted user '{}' in database.", target_user.username);
+    info!("Auth Cache: Removing entry for updated user '{}'.", target_user.username);
+    state.user_cache.remove(&target_user.username);
 
     match result {
         Ok(_) => {
@@ -498,82 +514,117 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
         Some(auth_header) => {
             match auth_header.to_str() {
                 Ok(auth_str) => {
-                    // Check for "Basic" authentication
                     if auth_str.starts_with("Basic ") {
                         let encoded_credentials = &auth_str[6..];
 
-                        // 1. Attempt regular user authentication first
+                        // --- 1. Try user authentication ---
                         match general_purpose::STANDARD.decode(encoded_credentials) {
                             Ok(decoded_credentials) => {
                                 match String::from_utf8(decoded_credentials) {
                                     Ok(credentials_str) => {
                                         let parts: Vec<&str> = credentials_str.split(':').collect();
                                         if parts.len() == 2 {
-                                            let (username, password) = (parts[0], parts[1]);
-                                            match fetch_user_from_db(username).await {
+                                            let username = parts[0];
+                                            let password = parts[1];
+                                            let user_from_source: Option<User>;
+
+                                            // Check cache first
+                                            if let Some(cached_user_ref) = state.user_cache.get(username) {
+                                                info!("Auth: Cache hit for user '{}'", username);
+                                                user_from_source = Some(cached_user_ref.value().clone()); // Clone from cache ref
+                                            } else {
+                                                // Not in cache, call the original DB fetch function
+                                                info!("Auth: Cache miss for user '{}'. Calling fetch_user_from_db...", username);
+                                                let db_user_option = fetch_user_from_db(username).await;
+
+                                                // If found in DB, insert into cache
+                                                if let Some(ref db_user) = db_user_option {
+                                                    info!("Auth: User '{}' found in DB. Adding to cache.", username);
+                                                    state.user_cache.insert(username.to_string(), db_user.clone());
+                                                } else {
+                                                    info!("Auth: User '{}' not found in DB.", username);
+                                                }
+                                                user_from_source = db_user_option; // Use the result from DB fetch
+                                            }
+
+                                            // Now, validate using user_from_source (which is Option<User>)
+                                            match user_from_source {
                                                 Some(user) => {
-                                                    if user.password_hash == password  && user.auth_group != "pending" {
-                                                        req.extensions_mut().insert(user);
+                                                    if user.password_hash == password && user.auth_group != "pending" {
+                                                        info!("Auth: User '{}' authenticated successfully (via cache or DB).", username);
+                                                        req.extensions_mut().insert(user); // Add user to request extensions
                                                         return Ok(()); // Successful user authentication
-                                                    } else {
-                                                        warn!("Incorrect password for user: {}", username);
-                                                        // Fall through to check for replication node auth
+                                                    } else if user.password_hash != password {
+                                                        warn!("Auth: Incorrect password for user '{}'", username);
+                                                        // Fall through to check replication node
+                                                    } else { // password ok, but group is pending
+                                                        warn!("Auth: User '{}' account is pending approval.", username);
+                                                        // Fall through to check replication node
                                                     }
                                                 },
                                                 None => {
-                                                    warn!("No user found with username: {}", username);
-                                                    // Fall through to check for replication node auth
+                                                    warn!("Auth: No user found with username '{}' (checked cache/DB).", username);
+                                                    // Fall through to check replication node
                                                 }
                                             }
-                                        } else {
-                                            warn!("Invalid credentials format (not username:password)");
-                                            return Err(ErrorUnauthorized("Invalid credentials format"));
+                                        } else { // parts.len() != 2
+                                            warn!("Auth: Invalid Basic credentials format.");
+                                            // Don't return Err yet, could be replication node
                                         }
                                     },
-                                    Err(e) => {
-                                        error!("UTF-8 conversion error: {:?}", e);
-                                        return Err(ErrorUnauthorized("Invalid credentials"));
+                                    Err(e) => { // String::from_utf8 error
+                                        error!("Auth: Credentials UTF-8 conversion error: {:?}", e);
+                                        // Don't return Err yet, could be replication node
                                     }
                                 }
                             },
-                            Err(e) => {
-                                warn!("Base64 decoding failed: {:?}", e);
-                                //Might be a replication node, so fall through
+                            Err(e) => { // base64::decode error
+                                // Don't log error, could be replication node trying non-base64
+                                warn!("Auth: Base64 decoding failed (could be replication node): {:?}", e);
+                                // Fall through to check replication node
                             }
-                        }
+                        } // End user credential processing
 
-                        // 2. If user authentication fails, try replication node authentication
+                        // --- 2. Try replication node authentication (if user auth failed) ---
+                        info!("Auth: Checking for replication node credentials...");
                         let config = &state.config;
                         let nodes_config = match load_nodes(config) {
                             Ok(config) => config,
-                            Err(_) => return Err(ErrorUnauthorized("Could not load node configuration")),
+                            Err(e) => {
+                                error!("Auth: Failed to load node configuration: {}", e);
+                                // If node config fails, then final failure (user auth already failed)
+                                return Err(ErrorUnauthorized("Authentication failed (node config error)"));
+                            }
                         };
-
-                        if let Some(_node) = nodes_config.nodes.iter().find(|node| {
-                            let credentials = format!("{}:{}", node.name, node.shared_secret);
-                            let encoded_credentials = general_purpose::STANDARD.encode(credentials);
-                            format!("Basic {}", encoded_credentials) == auth_str
+                        // Use full header comparison for replication node check
+                        if let Some(node) = nodes_config.nodes.iter().find(|node| {
+                            let expected_credentials = format!("{}:{}", node.name, node.shared_secret);
+                            let expected_encoded = general_purpose::STANDARD.encode(expected_credentials);
+                            auth_str == format!("Basic {}", expected_encoded)
                         }) {
-                            // Add any specific logic for handling authenticated replication nodes here.
-                            return Ok(());
+                            info!("Auth: Authenticated as replication node '{}'.", node.name);
+                            return Ok(()); // Successful replication node authentication
                         } else {
-                            warn!("Invalid shared secret for replication node");
+                            warn!("Auth: Credentials did not match any known user or replication node.");
                         }
-                    } else {
-                        warn!("Authorization header does not start with 'Basic '");
+
+                    } else { // auth_str doesn't start with "Basic "
+                        warn!("Auth: Authorization header does not start with 'Basic '");
                     }
                 },
-
-                Err(e) => {
-                    error!("Failed to convert Authorization header to string: {:?}", e);
+                Err(e) => { // auth_header.to_str() error
+                    error!("Auth: Failed to convert Authorization header to string: {:?}", e);
                 }
             }
         },
-        None => {
-            error!("No Authorization header present");
+        None => { // req.headers().get("Authorization") is None
+            info!("Auth: No Authorization header present in request.");
         }
     }
-    Err(ErrorUnauthorized("Invalid credentials"))
+
+    // If we reach here, no authentication method succeeded
+    error!("Auth: Final check failed. No valid credentials provided.");
+    Err(ErrorUnauthorized("Invalid credentials or missing authorization")) // Final failure
 }
 
 

@@ -1,4 +1,6 @@
+use std::cmp::min;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
 use crate::query::parser::{sql_parser, ASTNode, Expression, Identifier};
 use crate::tables::table::{create_table, delete_row, get_table_at_timestamp, get_table_data, insert_row, load_table_data_from_file, recalculate_table, update_row};
@@ -7,7 +9,7 @@ use crate::schema::schema::{drop_table, get_column_names_from_schema};
 use crate::{AppState, USERS_TABLE};
 use actix_web::{post, web, HttpRequest, HttpResponse};
 use anyhow::anyhow;
-use tracing::log::{error, info, warn};
+use tracing::log::{error, warn};
 use uuid::Uuid;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -30,8 +32,8 @@ pub async fn execute_query(
     #[allow(clippy::never_loop)]
     for (.., ast_node) in ast_nodes.iter().enumerate() {
         return match ast_node {
-            ASTNode::Select { columns, table, timestamp } => {
-                handle_select(columns, table, timestamp, &data, where_clause.clone()).await
+            ASTNode::Select { columns, table, timestamp, limit } => {
+                handle_select(columns, table, timestamp, *limit, &data, where_clause.clone()).await
             }
             ASTNode::Create { table, columns } => {
                 handle_create_table(table, columns, &data)
@@ -60,45 +62,99 @@ async fn handle_select(
     columns: &[Identifier],
     table: &Identifier,
     timestamp: &Option<String>,
+    limit: Option<u64>, // Limit parameter
     data: &web::Data<AppState>,
     where_clause: Option<Expression>,
 ) -> HttpResponse {
     if let Identifier::Name(table_name) = table {
-        // Retrieve table data
-        let table_data_result = if let Some(timestamp) = timestamp {
-            get_table_at_timestamp(data.clone(), table_name, timestamp.clone()).await
+        // Retrieve Table Data
+        let table_data_result = if let Some(ts) = timestamp {
+            get_table_at_timestamp(data.clone(), table_name, ts.clone()).await
         } else {
             get_table_data(data.clone(), table_name).await
         };
 
-        // Handle table data retrieval
         match table_data_result {
-            Ok(mut table_data) => {
-                // If a WHERE clause exists, filter the rows based on it
-                if let Some(condition) = &where_clause {
-                    let column_names = match get_column_names_from_schema(data, table_name) {
-                        Ok(names) => {
-                            names
-                        },
+            Ok(mut table_data_filtered) => {
+                // Preserve Header & Handle Empty
+                let original_column_names: Vec<String> = if !table_data_filtered.is_empty() {
+                    table_data_filtered[0].clone()
+                } else {
+                    match get_column_names_from_schema(data, table_name) {
+                        Ok(names) => names,
                         Err(e) => {
-                            error!("Error fetching column names: {}", e);
-                            return HttpResponse::InternalServerError().json(json!({"error": format!("Error fetching column names: {}", e)}));
+                            error!("Error fetching columns for empty table '{}': {}", table_name, e);
+                            return HttpResponse::Ok().json(json!([])); // Return empty array
                         }
-                    };
-                    table_data.retain(|row| row == &column_names ||
-                            evaluate_where_clause(condition, row, &column_names));
+                    }
+                };
+                // Add header if data was initially empty but columns found
+                if table_data_filtered.is_empty() && !original_column_names.is_empty() {
+                    table_data_filtered.push(original_column_names.clone());
                 }
 
-                // Process the SELECT query
-                let result = process_select(columns, &table_data, data.clone(), table_name).await;
-                if result.len() <= 1 {
-                    info!("No matching rows found in result");
-                    HttpResponse::Ok().json(json!({ "message": "No matching rows found" }))
+                // Apply WHERE Clause Filtering
+                if let Some(condition) = &where_clause {
+                    if table_data_filtered.len() > 1 { // Only filter if data rows exist
+                        table_data_filtered.retain(|row| {
+                            row == &original_column_names // Keep header
+                                || evaluate_where_clause(condition, row, &original_column_names)
+                        });
+                    }
+                }
+
+                // Prepare Data for Processing (Apply Limit only if > 0)
+                let data_to_process: Vec<Vec<String>>; // Declare data slice to process
+
+                if let Some(limit_val) = limit {
+                    // ONLY apply limiting logic if LIMIT N where N > 0 is specified
+                    if limit_val > 0 {
+                        let mut limited_data: Vec<Vec<String>> = Vec::new();
+                        if !table_data_filtered.is_empty() {
+                            // Always add header if it exists
+                            limited_data.push(table_data_filtered[0].clone());
+
+                            // Add limited data rows if they exist
+                            if table_data_filtered.len() > 1 {
+                                let data_rows_available = table_data_filtered.len() - 1;
+                                let rows_to_take = min(limit_val as usize, data_rows_available);
+                                limited_data.extend(table_data_filtered.into_iter().skip(1).take(rows_to_take));
+                            }
+                        }
+                        data_to_process = limited_data; // Process the limited set
+                    } else {
+                        // LIMIT 0: Treat as no limit, process all filtered data
+                        data_to_process = table_data_filtered;
+                    }
                 } else {
-                    match serde_json::to_string(&result) {
-                        Ok(json) => {
-                            HttpResponse::Ok().json(serde_json::from_str::<Value>(&json).unwrap())
-                        },
+                    // No LIMIT specified, process all filtered data
+                    data_to_process = table_data_filtered;
+                }
+
+                // Call process_select only on the data determined above (potentially limited or all)
+                let final_result: Vec<Vec<Value>> =
+                    process_select(columns, &data_to_process, data.clone(), table_name).await;
+
+                // Check if final result is empty or just contains the header row
+                if final_result.len() <= 1 {
+                    // Return header row if it exists, otherwise empty array
+                    if !final_result.is_empty() {
+                        match serde_json::to_string(&final_result) {
+                            Ok(json) => HttpResponse::Ok().content_type("application/json").body(json),
+                            Err(e) => {
+                                error!("Serialization error for header: {}", e);
+                                HttpResponse::Ok().json(json!([])) // Fallback
+                            },
+                        }
+                    } else {
+                        HttpResponse::Ok().json(json!([])) // No header, definitely empty
+                    }
+                } else {
+                    // Return results (header + data rows)
+                    match serde_json::to_string(&final_result) {
+                        Ok(json_string) => {
+                            HttpResponse::Ok().content_type("application/json").body(json_string)
+                        }
                         Err(e) => {
                             error!("Serialization error: {}", e);
                             HttpResponse::InternalServerError().json(json!({"error": format!("Serialization error: {}", e)}))
@@ -107,18 +163,16 @@ async fn handle_select(
                 }
             }
             Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    error!("Table not found: {}", table_name);
+                // Handle data retrieval errors
+                if e.kind() == ErrorKind::NotFound {
                     HttpResponse::NotFound().json(json!({"error": format!("Table '{}' not found", table_name)}))
                 } else {
-                    error!("Error retrieving table data: {}", e);
                     HttpResponse::InternalServerError().json(json!({"error": format!("Error retrieving table data: {}", e)}))
                 }
             }
         }
     } else {
-        error!("Invalid table name in SELECT query");
-        HttpResponse::BadRequest().json(json!({ "error": "Invalid table name" }))
+        HttpResponse::BadRequest().json(json!({ "error": "Invalid table name identifier provided" }))
     }
 }
 

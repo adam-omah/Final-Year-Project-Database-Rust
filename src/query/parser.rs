@@ -34,6 +34,7 @@ pub enum ASTNode {
         columns: Vec<Identifier>,      // Columns in the SELECT clause
         table: Identifier,             // Table in the FROM clause
         timestamp: Option<String>,     // Optional timestamp after 'AT'
+        limit: Option<u64>,            // Optional Limit tag
     },
     Where { condition: Expression },
     Insert { table: Identifier, values: Vec<Identifier>, columns: Vec<Identifier> },
@@ -170,6 +171,7 @@ fn tokenize_query(query_str: &str) -> Result<Vec<String>, String> {
 fn parse_select_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<ASTNode, String> {
     let mut columns = Vec::new();
     let mut timestamp: Option<String> = None;
+    let mut limit: Option<u64> = None;
     *index += 1; // Move past "SELECT"
 
     // Parse the column list (e.g., `*` or specific columns)
@@ -212,11 +214,34 @@ fn parse_select_clause(tokens: &mut Vec<String>, index: &mut usize) -> Result<AS
                 }
             }
 
+            // Parse the optional "LIMIT <number>" clause
+            if *index < tokens.len() && tokens[*index].to_uppercase() == "LIMIT" { // Use uppercase
+                *index += 1; // Move past "LIMIT"
+                if *index < tokens.len() {
+                    // Try to parse the next token as a u64 number
+                    match tokens[*index].parse::<u64>() {
+                        Ok(limit_val) => {
+                            limit = Some(limit_val);
+                            *index += 1; // Move past the number
+                        }
+                        Err(_) => {
+                            return Err(format!(
+                                "Expected a non-negative integer after 'LIMIT', found: {}",
+                                tokens[*index]
+                            ));
+                        }
+                    }
+                } else {
+                    return Err("Expected number after 'LIMIT'".to_string());
+                }
+            }
+
             // Return the SELECT AST node
             Ok(ASTNode::Select {
                 columns,
                 table,
                 timestamp,
+                limit,
             })
         } else {
             Err("Expected table name after 'FROM'".to_string())

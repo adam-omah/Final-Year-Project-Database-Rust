@@ -304,140 +304,189 @@ async fn delete_user(
 }
 
 pub async fn create_default_user(app_state: &AppState) -> std::io::Result<()> {
-    info!("Creating default admin user");
+    info!("Starting default admin user creation process...");
 
-    // Use a block scope to limit the lifetime of schema_locked
-    {
-        let schema_locked = app_state.schema.lock().unwrap();
-        if !schema_locked.tables.contains_key(&format!("{}_initial", USERS_TABLE)) {
-            // Release the lock automatically at the end of this block
-            drop(schema_locked);
+    // --- 1. Ensure 'auth_users' Table Exists ---
+    // Use a block scope to ensure the lock is released promptly.
+    let table_exists: bool = {
+        let schema_guard = app_state.schema.lock().unwrap();
+        // Check for the initial table name as used internally by your storage logic
+        schema_guard
+            .tables
+            .contains_key(&format!("{}_initial", USERS_TABLE))
+    }; // schema_guard is dropped here, releasing the lock
 
-            // Define user table schema with auth_group column
-            let user_table = Table {
-                name: USERS_TABLE.to_string(),
-                columns: vec![
-                    Column {
-                        name: "username".to_string(),
-                        data_type: DataType::String,
-                        rules: vec![],
-                    },
-                    Column {
-                        name: "password_hash".to_string(),
-                        data_type: DataType::String,
-                        rules: vec![],
-                    },
-                    Column {
-                        name: "auth_group".to_string(),
-                        data_type: DataType::String,
-                        rules: vec![],
-                    }
-                ],
-            };
+    if !table_exists {
+        info!("'{}' table does not exist in schema cache. Attempting creation...", USERS_TABLE);
+        // Define the schema for the authentication users table
+        let user_table = Table {
+            name: USERS_TABLE.to_string(), // Use the constant
+            columns: vec![
+                Column {
+                    name: "username".to_string(),
+                    data_type: DataType::String,
+                    rules: vec![],
+                },
+                Column {
+                    name: "password_hash".to_string(),
+                    data_type: DataType::String,
+                    rules: vec![],
+                },
+                Column {
+                    name: "auth_group".to_string(),
+                    data_type: DataType::String,
+                    rules: vec![],
+                },
+            ],
+        };
 
-            // Create the users table
-            create_table(&user_table, &Data::new(app_state.clone()))?;
-            info!("Created users table");
-        } else {
-            // If table exists, still release the lock before proceeding
-            drop(schema_locked);
+        // Attempt to create the table using the storage function
+        match create_table(&user_table, &Data::new(app_state.clone())) {
+            Ok(_) => {
+                info!("Successfully created '{}' table.", USERS_TABLE);
+            }
+            Err(e) => {
+                error!(
+                    "Failed to create '{}' table during default user setup: {}",
+                    USERS_TABLE, e
+                );
+                // Propagate the error; setup cannot continue without the table
+                return Err(e);
+            }
         }
+    } else {
+        info!("'{}' table already exists in schema cache.", USERS_TABLE);
     }
 
-    info!("Checking for admin user");
-    let query = format!("SELECT * FROM {} WHERE username = \"admin\"", USERS_TABLE);
-    match sql_parser(query.as_bytes()) {
-        Ok(ast_nodes) => {
-            // Use global_execute_query instead of execute_query
-            match global_execute_query(ast_nodes).await {
+    // 2. Check if 'admin' User Exists
+    info!("Checking for existing 'admin' user in '{}' table...", USERS_TABLE);
+    // Construct the SELECT query carefully, ensuring quotes if needed by the parser/executor
+    let select_query = format!("SELECT * FROM {} WHERE username = \"admin\"", USERS_TABLE);
+
+    match sql_parser(select_query.as_bytes()) {
+        Ok(select_ast_nodes) => {
+            info!("Successfully parsed SELECT query for admin user check.");
+            // Execute the SELECT query using the global executor
+            match global_execute_query(select_ast_nodes).await {
+                // Query Execution Successful
                 Ok(response) => {
-                    if response.status() == actix_web::http::StatusCode::OK {
-                        // Rest of the existing code remains the same
+                    let status = response.status();
+                    info!("SELECT query execution finished with status: {}", status);
+                    // Proceed only if the status code indicates success (e.g., 200 OK)
+                    if status.is_success() {
+                        // Read the response body
                         match body::to_bytes(response.into_body()).await {
                             Ok(body_bytes) => {
-                                // Parse the JSON response
+                                // Attempt to parse the body as JSON Value
                                 match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                                    // JSON Parsing Successful ---
                                     Ok(json_response) => {
-                                        if let Some(message) = json_response.get("message") {
-                                            if message == "No matching rows found" {
-                                                // No admin user exists, create one with admin auth_group
+                                        // *** NEW LOGIC: Check if the response is an array and its length ***
+                                        if let Some(array) = json_response.as_array() {
+                                            info!("Response is a JSON array with length: {}", array.len());
+                                            // If length is > 1, it means header + data row(s) exist.
+                                            // If length is <= 1, it means only header or empty array (no admin data).
+                                            if array.len() > 1 {
+                                                // User 'admin' exists (header + at least one data row)
+                                                info!("Admin user found (JSON array length > 1). No action needed.");
+                                                Ok(()) // Indicate success, default user exists or setup not needed
+                                            } else {
+                                                // User 'admin' does NOT exist (empty array or header only)
+                                                info!("Admin user not found (JSON array length <= 1). Proceeding to create default user...");
                                                 let insert_query = format!(
-                                                    "INSERT INTO {} (username, password_hash, auth_group) VALUES ( \"admin\", \"admin\", \"admin\")",
-                                                    USERS_TABLE,
+                                                    "INSERT INTO {} (username, password_hash, auth_group) VALUES ( \"admin\", \"admin\", \"admin\")", // Consider hashing the password!
+                                                    USERS_TABLE
                                                 );
-                                                let insert_query_bytes = insert_query.as_bytes();
-
-                                                match sql_parser(insert_query_bytes) {
+                                                info!("Constructed INSERT query: {}", insert_query); // Log the query for debugging
+                                                match sql_parser(insert_query.as_bytes()) {
                                                     Ok(insert_ast_nodes) => {
+                                                        // Execute the INSERT query
                                                         match global_execute_query(insert_ast_nodes).await {
                                                             Ok(insert_response) => {
-                                                                if insert_response.status() == actix_web::http::StatusCode::OK {
+                                                                let insert_status = insert_response.status();
+                                                                if insert_status.is_success() {
+                                                                    // Optionally read/verify insert response body if needed
                                                                     match body::to_bytes(insert_response.into_body()).await {
-                                                                        Ok(_) => {
-                                                                            info!("Default admin user created successfully.");
+                                                                        Ok(insert_body) => {
+                                                                            info!("Default admin user created successfully. Response body: {:?}", String::from_utf8_lossy(&insert_body));
                                                                             Ok(())
                                                                         }
                                                                         Err(e) => {
-                                                                            error!("Failed to process default admin user creation response: {:?}", e);
-                                                                            Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                                                                            error!("Failed to read INSERT response body, but status was success: {:?}", e);
+                                                                            // Decide if this is still considered overall success
+                                                                            Ok(()) // Or return error if body needed verification
                                                                         }
                                                                     }
                                                                 } else {
-                                                                    error!("Failed to create default admin user: {:?}", insert_response);
-                                                                    Err(std::io::Error::new(std::io::ErrorKind::Other, "Failed to create default admin user"))
+                                                                    // INSERT query execution failed
+                                                                    error!("INSERT query failed with status: {}", insert_status);
+                                                                    // Attempt to read error body for more details
+                                                                    let error_body = match body::to_bytes(insert_response.into_body()).await {
+                                                                        Ok(b) => String::from_utf8_lossy(&b).to_string(),
+                                                                        Err(_) => "Could not read error response body".to_string(),
+                                                                    };
+                                                                    error!("INSERT failure response body: {}", error_body);
+                                                                    Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create default admin user. Status: {}. Body: {}", insert_status, error_body)))
                                                                 }
                                                             }
                                                             Err(e) => {
-                                                                error!("Global query execution error: {}", e);
-                                                                Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                                                                // Error executing the INSERT query itself
+                                                                error!("Error executing INSERT global query: {}", e);
+                                                                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("INSERT global_execute_query error: {}", e)))
                                                             }
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        error!("Error parsing insert query: {}", e);
-                                                        Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                                                        // Error parsing the INSERT query
+                                                        error!("Error parsing INSERT query: {}", e);
+                                                        Err(std::io::Error::new(std::io::ErrorKind::Other, format!("INSERT sql_parser error: {}", e)))
                                                     }
                                                 }
-                                            } else {
-                                                // Some other message, consider as user exists
-                                                info!("Admin user query returned: {}", message);
-                                                Ok(())
                                             }
-                                        } else if !body_bytes.is_empty() {
-                                            // Non-empty response but no "message" field
-                                            info!("Admin user likely exists");
-                                            Ok(())
                                         } else {
-                                            // Empty response
-                                            error!("Empty response received");
-                                            Err(std::io::Error::new(std::io::ErrorKind::Other, "Empty response"))
+                                            // Response was valid JSON, but not an array. This is unexpected.
+                                            error!("Parsed JSON response is not an array as expected from handle_select. Response: {:?}", json_response);
+                                            Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Unexpected JSON response format (not an array)"))
                                         }
                                     }
+                                    // SON Parsing Failed
                                     Err(e) => {
-                                        error!("Failed to parse JSON response: {}", e);
-                                        Err(std::io::Error::new(std::io::ErrorKind::Other, "Invalid response format"))
+                                        let body_str = String::from_utf8_lossy(&body_bytes);
+                                        error!("Failed to parse SELECT response body as JSON: {}. Body: '{}'", e, body_str);
+                                        Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Failed to parse JSON response: {}", e)))
                                     }
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to convert response body: {:?}", e);
-                                Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                                // Error reading the SELECT response body
+                                error!("Failed to read SELECT response body bytes: {:?}", e);
+                                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read response body: {}", e)))
                             }
                         }
                     } else {
-                        error!("Query failed: {:?}", response);
-                        Err(std::io::Error::new(std::io::ErrorKind::Other, "Query failed"))
+                        // SELECT query execution failed (non-2xx status)
+                        error!("SELECT query execution failed with status: {}", status);
+                        // Attempt to read error body for more details
+                        let error_body = match body::to_bytes(response.into_body()).await {
+                            Ok(b) => String::from_utf8_lossy(&b).to_string(),
+                            Err(_) => "Could not read error response body".to_string(),
+                        };
+                        error!("SELECT failure response body: {}", error_body);
+                        Err(std::io::Error::new(std::io::ErrorKind::Other, format!("SELECT query failed. Status: {}. Body: {}", status, error_body)))
                     }
                 }
+                // Query Execution Failed
                 Err(e) => {
-                    error!("Global query execution error: {}", e);
-                    Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                    // Error executing the SELECT query itself
+                    error!("Error executing SELECT global query: {}", e);
+                    Err(std::io::Error::new(std::io::ErrorKind::Other, format!("SELECT global_execute_query error: {}", e)))
                 }
             }
         }
         Err(e) => {
-            error!("Parse error: {}", e);
-            Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            // Error parsing the SELECT query
+            error!("Error parsing SELECT query: {}", e);
+            Err(std::io::Error::new(std::io::ErrorKind::Other, format!("SELECT sql_parser error: {}", e)))
         }
     }
 }

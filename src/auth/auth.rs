@@ -517,7 +517,7 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
                     if auth_str.starts_with("Basic ") {
                         let encoded_credentials = &auth_str[6..];
 
-                        // --- 1. Try user authentication ---
+                        // Try user authentication
                         match general_purpose::STANDARD.decode(encoded_credentials) {
                             Ok(decoded_credentials) => {
                                 match String::from_utf8(decoded_credentials) {
@@ -530,19 +530,14 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
 
                                             // Check cache first
                                             if let Some(cached_user_ref) = state.user_cache.get(username) {
-                                                info!("Auth: Cache hit for user '{}'", username);
                                                 user_from_source = Some(cached_user_ref.value().clone()); // Clone from cache ref
                                             } else {
                                                 // Not in cache, call the original DB fetch function
-                                                info!("Auth: Cache miss for user '{}'. Calling fetch_user_from_db...", username);
                                                 let db_user_option = fetch_user_from_db(username).await;
 
                                                 // If found in DB, insert into cache
                                                 if let Some(ref db_user) = db_user_option {
-                                                    info!("Auth: User '{}' found in DB. Adding to cache.", username);
                                                     state.user_cache.insert(username.to_string(), db_user.clone());
-                                                } else {
-                                                    info!("Auth: User '{}' not found in DB.", username);
                                                 }
                                                 user_from_source = db_user_option; // Use the result from DB fetch
                                             }
@@ -551,7 +546,6 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
                                             match user_from_source {
                                                 Some(user) => {
                                                     if user.password_hash == password && user.auth_group != "pending" {
-                                                        info!("Auth: User '{}' authenticated successfully (via cache or DB).", username);
                                                         req.extensions_mut().insert(user); // Add user to request extensions
                                                         return Ok(()); // Successful user authentication
                                                     } else if user.password_hash != password {
@@ -585,8 +579,7 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
                             }
                         } // End user credential processing
 
-                        // --- 2. Try replication node authentication (if user auth failed) ---
-                        info!("Auth: Checking for replication node credentials...");
+                        // Try replication node authentication (if user auth failed)
                         let config = &state.config;
                         let nodes_config = match load_nodes(config) {
                             Ok(config) => config,
@@ -597,12 +590,11 @@ pub async fn authenticate_request(req: &HttpRequest, state: &Data<AppState>) -> 
                             }
                         };
                         // Use full header comparison for replication node check
-                        if let Some(node) = nodes_config.nodes.iter().find(|node| {
+                        if let Some(_node) = nodes_config.nodes.iter().find(|node| {
                             let expected_credentials = format!("{}:{}", node.name, node.shared_secret);
                             let expected_encoded = general_purpose::STANDARD.encode(expected_credentials);
                             auth_str == format!("Basic {}", expected_encoded)
                         }) {
-                            info!("Auth: Authenticated as replication node '{}'.", node.name);
                             return Ok(()); // Successful replication node authentication
                         } else {
                             warn!("Auth: Credentials did not match any known user or replication node.");

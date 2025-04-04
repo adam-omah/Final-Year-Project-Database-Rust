@@ -602,6 +602,7 @@ mod parser_tests {
                 columns: vec![Identifier::Star],
                 table: Identifier::Name("users".to_string()),
                 timestamp: Some("2025-02-11 20:14:26".to_string()),
+                limit: None,
             }]
         );
     }
@@ -621,6 +622,7 @@ mod parser_tests {
                 ],
                 table: Identifier::Name("users".to_string()),
                 timestamp: None,
+                limit: None,
             }]
         );
     }
@@ -639,6 +641,7 @@ mod parser_tests {
                 ],
                 table: Identifier::Name("users".to_string()),
                 timestamp: None,
+                limit: None,
             }]
         );
     }
@@ -654,6 +657,7 @@ mod parser_tests {
                 columns: vec![Identifier::Star],
                 table: Identifier::Name("users".to_string()),
                 timestamp: None,
+                limit: None,
             }]
         );
     }
